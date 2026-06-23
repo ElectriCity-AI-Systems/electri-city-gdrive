@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/electridrive-linux-v1.0
-ExecStart=%h/electridrive-linux-v1.0/.venv/bin/python -m electridrive.cli sync-up %h/Dokumente --remote-folder ElectriDrive/LinuxBackup
+# Edit these paths to where you cloned the repo (the folder containing app.py).
+WorkingDirectory=%h/electri-city-gdrive
+ExecStart=%h/electri-city-gdrive/.venv/bin/python -m electridrive.cli sync-up %h/Dokumente --remote-folder ElectriDrive/LinuxBackup
 Nice=10
 IOSchedulingClass=best-effort
 

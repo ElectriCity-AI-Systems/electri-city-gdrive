@@ -34,17 +34,42 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
 |---|---|---|
 | ![Login](assets/screenshots/login.png) | ![Transfers](assets/screenshots/transfers.png) | ![Virtual Drive](assets/screenshots/virtual-drive.png) |
 
-## Install (Ubuntu/Debian)
+## Install
+
+### Option A — download a ready-to-run build (recommended)
+
+Grab the latest **AppImage** or **.deb** from the
+[Releases page](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest):
+
+```bash
+# AppImage (portable, nothing to install):
+chmod +x ElectriDrive-x86_64.AppImage
+./ElectriDrive-x86_64.AppImage           # on FUSE3-only systems: ./ElectriDrive-x86_64.AppImage --appimage-extract-and-run
+
+# …or the .deb (installs to /opt + app-menu entry):
+sudo apt install ./electridrive_2.0.0_amd64.deb
+
+# optional: verify the download
+sha256sum -c SHA256SUMS.txt
+```
+
+### Option B — run from source (developers)
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-venv python3-pip libfuse3-3 fuse3 -y   # fuse only needed for Virtual Drive
+sudo apt install python3 python3-venv python3-pip libfuse3-3 fuse3 -y   # fuse only for Virtual Drive
 
-cd electridrive-linux-v1.0
-bash scripts/install_dev.sh          # creates .venv, installs deps, runs tests
-# add a menu launcher (optional):
-bash scripts/install_desktop.sh
+git clone https://github.com/ElectriCity-AI-Systems/electri-city-gdrive.git
+cd electri-city-gdrive
+bash scripts/install_dev.sh              # creates .venv, installs deps, runs tests
+source .venv/bin/activate && python app.py
+bash scripts/install_desktop.sh          # optional app-menu launcher
 ```
+
+> Downloaded the source **ZIP** instead of cloning? Unzip it and `cd` into the extracted
+> folder (e.g. `electri-city-gdrive-main`) — the project lives at the **root**, there is no
+> `electridrive-linux-v1.0` sub-folder. If you hit a "bad interpreter" error, a stale `.venv`
+> got moved; run `rm -rf .venv` and re-run `bash scripts/install_dev.sh`.
 
 ## Connect Google Drive
 
