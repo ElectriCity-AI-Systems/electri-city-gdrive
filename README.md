@@ -1,5 +1,11 @@
 # ⚡ ElectriDrive — Electric-City Drive for Linux
 
+[![Latest release](https://img.shields.io/github/v/release/ElectriCity-AI-Systems/electri-city-gdrive?sort=semver)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)
+[![Download](https://img.shields.io/badge/download-AppImage%20%7C%20.deb-22D3EE)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)
+![Platform](https://img.shields.io/badge/platform-Linux-555)
+![No rclone](https://img.shields.io/badge/no-rclone-3B82F6)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 **A beautiful, native, safety-first Google Drive client for Linux — browse, up/download,
 two-way sync, and mount Drive as a virtual filesystem. Without rclone.**
 
@@ -7,6 +13,17 @@ ElectriDrive fills a gap that just opened up: GNOME 50 / Ubuntu 26.04 are **remo
 Google Drive from the file manager (the unmaintained `libgdata` integration), and the only
 suggested replacements are command-line tools like rclone and `google-drive-ocamlfuse`.
 ElectriDrive brings the experience back — with a modern Electric-Dark designer UI.
+
+> ## ⬇️ Get ElectriDrive
+> **Just want to use it? Download a ready-to-run build — no Python, no setup.**
+> → **[Latest AppImage or .deb](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)**
+> ```bash
+> chmod +x ElectriDrive-x86_64.AppImage && ./ElectriDrive-x86_64.AppImage
+> # …or:  sudo apt install ./electridrive_2.0.0_amd64.deb
+> ```
+> Running from source is only for developers — see [Install → Option B](#install).
+>
+> 💛 Free & open source. If it helps you, **[donate what you want](https://www.paypal.com/donate/?hosted_button_id=SATEMACLEGSTL)** — thank you!
 
 ![Explorer](assets/screenshots/explorer.png)
 
