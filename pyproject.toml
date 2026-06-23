@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "electridrive-linux"
+version = "2.0.0"
+description = "Beautiful, safety-first Google Drive client for Linux — browse, sync and mount, without rclone"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Pierre Stephan / Electri_C_ity Studios"}]
+keywords = ["google drive", "linux", "sync", "fuse", "pyside6", "desktop"]
+dependencies = [
+  "PySide6>=6.6",
+  "keyring>=25.0",
+  "watchdog>=4.0",
+  "fusepy>=3.0.1",
+  "google-api-python-client>=2.120",
+  "google-auth>=2.29",
+  "google-auth-oauthlib>=1.2",
+  "google-auth-httplib2>=0.2",
+  "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+electridrive = "electridrive.cli:main"
+
+[project.gui-scripts]
+electridrive-gui = "electridrive.ui.app:run_app"
+
+[tool.setuptools.packages.find]
+include = ["electridrive*"]

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ElectriDrive
+GenericName=Google Drive Client
+Comment=Browse, sync and mount Google Drive — without rclone
+Exec=electridrive-gui
+Icon=electridrive
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=Google;Drive;Cloud;Sync;Backup;Mount;
+StartupNotify=true

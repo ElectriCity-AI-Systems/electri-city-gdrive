@@ -1,0 +1,10 @@
+PySide6>=6.6
+pytest>=8.0
+keyring>=25.0
+watchdog>=4.0
+fusepy>=3.0.1
+google-api-python-client>=2.120
+google-auth>=2.29
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+cryptography>=42.0

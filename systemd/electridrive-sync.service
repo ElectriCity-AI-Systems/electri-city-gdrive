@@ -1,0 +1,14 @@
+[Unit]
+Description=ElectriDrive Linux Safe Upload Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/electridrive-linux-v1.0
+ExecStart=%h/electridrive-linux-v1.0/.venv/bin/python -m electridrive.cli sync-up %h/Dokumente --remote-folder ElectriDrive/LinuxBackup
+Nice=10
+IOSchedulingClass=best-effort
+
+[Install]
+WantedBy=default.target

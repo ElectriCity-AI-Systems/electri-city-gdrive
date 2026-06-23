@@ -1,0 +1,15 @@
+[Unit]
+Description=ElectriDrive Pro license delivery (PayPal IPN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/srv/electridrive/server
+EnvironmentFile=/srv/electridrive/license.env
+ExecStart=/srv/electridrive/.venv/bin/gunicorn -w 2 -b 127.0.0.1:8000 "license_server:create_app()"
+Restart=on-failure
+User=electridrive
+Group=electridrive
+
+[Install]
+WantedBy=multi-user.target
