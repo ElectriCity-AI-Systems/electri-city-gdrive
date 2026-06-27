@@ -29,17 +29,36 @@ class FakeDrive:
                      "trashed": False, "starred": False}
         }
         self.uploads: list[tuple] = []
-        self.changes: list[RemoteChange] = []
+        # Faithful change feed: every mutation appends (seq, RemoteChange). A page
+        # token is just the high-water seq; list_changes returns changes with seq >
+        # token, mirroring Drive's changes.list contract closely enough to exercise
+        # the incremental-sync path.
+        self._change_seq = 0
+        self._change_log: list[tuple[int, RemoteChange]] = []
+        # Call counters so tests can assert the cache path avoids network round-trips.
+        self.list_folder_calls = 0
+        self.find_folder_calls = 0
+        self.list_changes_calls = 0
 
     # --------------------------------------------------------------- test setup
     def _nid(self, prefix: str) -> str:
         return f"{prefix}-{next(self._ids)}"
+
+    def _record_change(self, node_id: str, removed: bool = False) -> None:
+        self._change_seq += 1
+        if removed:
+            change = RemoteChange(file_id=node_id, removed=True, file=None)
+        else:
+            change = RemoteChange(file_id=node_id, removed=False,
+                                  file=self._to_remote(self.nodes[node_id]))
+        self._change_log.append((self._change_seq, change))
 
     def add_folder(self, name: str, parent: str = "root") -> str:
         nid = self._nid("folder")
         self.nodes[nid] = {"id": nid, "name": name, "mime": DRIVE_FOLDER_MIME,
                            "parent": parent, "content": None, "modified": "2024-01-01T00:00:00Z",
                            "trashed": False, "starred": False}
+        self._record_change(nid)
         return nid
 
     def add_file(self, name: str, content: bytes = b"data", parent: str = "root",
@@ -49,6 +68,7 @@ class FakeDrive:
         self.nodes[nid] = {"id": nid, "name": name, "mime": mime, "parent": parent,
                            "content": content, "modified": modified,
                            "trashed": False, "starred": starred}
+        self._record_change(nid)
         return nid
 
     def _to_remote(self, node: dict) -> RemoteFile:
@@ -64,6 +84,7 @@ class FakeDrive:
 
     # ----------------------------------------------------------------- protocol
     def find_folder(self, name: str, parent_id: str | None = None) -> str | None:
+        self.find_folder_calls += 1
         for n in self.nodes.values():
             if n["mime"] == DRIVE_FOLDER_MIME and n["name"] == name and not n["trashed"]:
                 if parent_id is None or n["parent"] == parent_id:
@@ -110,6 +131,7 @@ class FakeDrive:
         return dest_path
 
     def list_folder(self, parent_id: str = "root", page_token: str | None = None) -> FileListing:
+        self.list_folder_calls += 1
         children = [self._to_remote(n) for n in self.nodes.values()
                     if n["parent"] == parent_id and not n["trashed"]]
         children.sort(key=lambda r: (not r.is_folder, r.name.lower()))
@@ -129,10 +151,17 @@ class FakeDrive:
                             user_email="tester@example.com", user_name="Tester")
 
     def get_start_page_token(self) -> str:
-        return "tok-0"
+        return str(self._change_seq)
 
     def list_changes(self, page_token: str):
-        return list(self.changes), None, "tok-next"
+        self.list_changes_calls += 1
+        try:
+            since = int(page_token)
+        except (TypeError, ValueError):
+            since = 0
+        changes = [c for (seq, c) in self._change_log if seq > since]
+        return changes, None, str(self._change_seq)
 
     def trash(self, file_id: str) -> None:
         self.nodes[file_id]["trashed"] = True
+        self._record_change(file_id)

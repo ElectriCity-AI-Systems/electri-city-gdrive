@@ -6,6 +6,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import time
 
+# Bump when the shape of the *disposable* remote-node cache changes. The cache is
+# rebuilt from a full Drive walk on demand (see the sync engine's GUARD 0), so a
+# migration can safely DROP + recreate it rather than ALTER — this guarantees no
+# stale rows missing newer columns (e.g. md5) ever survive to drive a reconcile.
+CACHE_SCHEMA_VERSION = 1
+
+# Single source of truth for the remote-node cache schema (used by both the initial
+# create and the version-gated rebuild).
+_REMOTE_NODES_DDL = """
+CREATE TABLE IF NOT EXISTS remote_nodes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    mime_type TEXT,
+    size INTEGER,
+    modified_time TEXT,
+    md5 TEXT,
+    parent_id TEXT,
+    is_folder INTEGER NOT NULL DEFAULT 0,
+    trashed INTEGER NOT NULL DEFAULT 0,
+    fetched_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_remote_nodes_parent ON remote_nodes(parent_id);
+"""
+
 
 @dataclass(frozen=True)
 class FileRecord:
@@ -113,18 +137,6 @@ class SyncDatabase:
                     PRIMARY KEY (pair_id, local_rel)
                 );
 
-                CREATE TABLE IF NOT EXISTS remote_nodes (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    mime_type TEXT,
-                    size INTEGER,
-                    modified_time TEXT,
-                    parent_id TEXT,
-                    is_folder INTEGER NOT NULL DEFAULT 0,
-                    fetched_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_remote_nodes_parent ON remote_nodes(parent_id);
-
                 CREATE TABLE IF NOT EXISTS transfers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL,
@@ -140,7 +152,21 @@ class SyncDatabase:
                 );
                 """
             )
+            self._migrate_cache()
             self._conn.commit()
+
+    def _migrate_cache(self) -> None:
+        """Create / version-rebuild the disposable remote-node cache.
+
+        Called with the lock held. Because the cache is reseeded from a full Drive
+        walk on demand, a schema bump drops + recreates it instead of ALTERing — so
+        no rows missing newer columns (e.g. ``md5``) can ever survive."""
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < CACHE_SCHEMA_VERSION:
+            self._conn.executescript("DROP TABLE IF EXISTS remote_nodes;")
+        self._conn.executescript(_REMOTE_NODES_DDL)
+        if version < CACHE_SCHEMA_VERSION:
+            self._conn.execute(f"PRAGMA user_version = {CACHE_SCHEMA_VERSION}")
 
     # --------------------------------------------------------------- files index
     def get_file(self, local_path: str) -> FileRecord | None:
@@ -283,15 +309,50 @@ class SyncDatabase:
             self._conn.executemany(
                 """
                 INSERT OR REPLACE INTO remote_nodes(id, name, mime_type, size, modified_time,
-                                                    parent_id, is_folder, fetched_at)
-                VALUES(?,?,?,?,?,?,?,?)
+                                                    md5, parent_id, is_folder, trashed, fetched_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 [
-                    (f.id, f.name, f.mime_type, f.size, f.modified_time, parent_id,
-                     1 if getattr(f, "is_folder", False) else 0, now)
+                    (f.id, f.name, f.mime_type, f.size, f.modified_time,
+                     getattr(f, "md5_checksum", None), parent_id,
+                     1 if getattr(f, "is_folder", False) else 0,
+                     1 if getattr(f, "trashed", False) else 0, now)
                     for f in files
                 ],
             )
+            self._conn.commit()
+
+    def upsert_remote_node(self, file) -> None:
+        """Insert/update a single cached node from a Drive change. `file` is a RemoteFile."""
+        parents = getattr(file, "parents", ()) or ()
+        parent_id = parents[0] if parents else None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO remote_nodes(id, name, mime_type, size, modified_time,
+                                                    md5, parent_id, is_folder, trashed, fetched_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (file.id, file.name, file.mime_type, file.size, file.modified_time,
+                 getattr(file, "md5_checksum", None), parent_id,
+                 1 if getattr(file, "is_folder", False) else 0,
+                 1 if getattr(file, "trashed", False) else 0, time()),
+            )
+            self._conn.commit()
+
+    def delete_remote_node(self, file_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM remote_nodes WHERE id=?", (file_id,))
+            self._conn.commit()
+
+    def clear_remote_cache(self) -> None:
+        """Drop the whole remote-node cache and all change tokens.
+
+        Called when account identity / scope changes (the Drive change feed is
+        account- and scope-sensitive), forcing the next sync to do a full rescan."""
+        with self._lock:
+            self._conn.execute("DELETE FROM remote_nodes")
+            self._conn.execute("DELETE FROM change_tokens")
             self._conn.commit()
 
     def get_cached_children(self, parent_id: str) -> list[sqlite3.Row]:

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from electridrive.google_api.client import DRIVE_FOLDER_MIME, RemoteFile
+from electridrive.storage.database import SyncDatabase
 from electridrive.sync.uploader import plan_upload
 from fakes import FakeDrive
 
@@ -48,3 +50,31 @@ def test_plan_upload_reuses_existing_remote_folder(tmp_path: Path):
     projs = [n for n in fake.nodes.values() if n["name"] == "proj"]
     assert len(projs) == 1
     assert projs[0]["id"] == existing
+
+
+def test_plan_upload_resolves_folders_from_cache_without_find_folder(tmp_path: Path):
+    root = tmp_path / "proj"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "a.txt").write_text("a", encoding="utf-8")
+
+    fake = FakeDrive()
+    proj = fake.add_folder("proj", "root")
+    sub = fake.add_folder("sub", proj)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        # Seed the remote-node cache so existing folders resolve with no network call.
+        db.cache_remote_children("root", [RemoteFile(id=proj, name="proj",
+                                          mime_type=DRIVE_FOLDER_MIME, parents=("root",))])
+        db.cache_remote_children(proj, [RemoteFile(id=sub, name="sub",
+                                        mime_type=DRIVE_FOLDER_MIME, parents=(proj,))])
+
+        before = fake.find_folder_calls
+        items = plan_upload(fake, root, "root", db=db)
+
+        assert fake.find_folder_calls == before  # every folder came from the cache
+        assert sorted(i.name for i in items) == ["a.txt"]
+        assert items[0].parent_id == sub
+        assert len([n for n in fake.nodes.values() if n["name"] == "proj"]) == 1
+        assert len([n for n in fake.nodes.values() if n["name"] == "sub"]) == 1
+    finally:
+        db.close()

@@ -132,6 +132,9 @@ class DriveSession(QObject):
             on_update=lambda t: self.transfer_changed.emit(t),
             on_log=lambda m: self.log.emit(m),
         )
+        # Picker grants may not surface through the Drive changes() feed; drop the
+        # remote cache + tokens so the next sync re-walks and re-seeds (GUARD 0).
+        self.db.clear_remote_cache()
         if old:
             old.shutdown(wait=False)
 
@@ -143,6 +146,9 @@ class DriveSession(QObject):
         self.settings.scope = mode
         self.save()
         clear_credentials()
+        # The change feed is scope-sensitive (drive.file vs full drive see different
+        # files); a token/cache from the old scope must not be trusted under the new one.
+        self.db.clear_remote_cache()
         self.client = None
         self.about = None
 

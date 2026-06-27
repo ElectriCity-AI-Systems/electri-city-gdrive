@@ -60,11 +60,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
     try:
         pair = SyncPair(local_path=str(Path(args.local_folder).expanduser()),
                         remote_folder=args.remote_folder, direction=args.direction)
-        engine = TwoWaySyncEngine(GoogleDriveClient(), db, pair, log_cb=print)
+        engine = TwoWaySyncEngine(GoogleDriveClient(), db, pair, log_cb=print,
+                                  deep_verify=getattr(args, "deep_verify", False))
         report = engine.run()
         print(f"Done. up={report.uploaded} down={report.downloaded} "
               f"trash_remote={report.trashed_remote} trash_local={report.trashed_local} "
-              f"conflicts={report.conflicts} failed={report.failed}")
+              f"conflicts={report.conflicts} skipped={report.skipped} failed={report.failed}")
+        if getattr(args, "verbose", False):
+            print(f"  diagnostics: hashed={report.hashed} "
+                  f"remote_source={'full-scan' if report.full_remote_scan else 'incremental-cache'}")
         for err in report.errors:
             print(f"  ! {err}")
         return 0 if report.failed == 0 else 2
@@ -142,6 +146,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--remote-folder", required=True)
     p_sync.add_argument("--direction", choices=["two_way", "up_only", "down_only"],
                         default="two_way")
+    p_sync.add_argument("--deep-verify", action="store_true",
+                        help="always re-hash local files (ignore the mtime/size fast-path)")
+    p_sync.add_argument("--verbose", action="store_true",
+                        help="print extra diagnostics (files hashed, remote source)")
     p_sync.set_defaults(func=cmd_sync)
 
     p_dl = sub.add_parser("download", help="Download a file/folder by Drive file id")

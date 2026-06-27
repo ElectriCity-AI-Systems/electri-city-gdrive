@@ -142,6 +142,9 @@ class Settings:
     vfs_writable: bool = False  # writing through the FUSE mount is experimental
     cache_limit_mb: int = 4096
     last_remote_folder_id: str = "root"
+    # When True, two-way sync always re-hashes local files instead of trusting the
+    # (mtime, size) fast-path. Slower but catches in-place edits that preserve both.
+    deep_verify: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":

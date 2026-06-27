@@ -116,13 +116,16 @@ class SyncView(QWidget):
 
         def work():
             from electridrive.sync.twoway import TwoWaySyncEngine
-            return TwoWaySyncEngine(self._session.client, self._session.db, pair).run()
+            return TwoWaySyncEngine(
+                self._session.client, self._session.db, pair,
+                deep_verify=getattr(self._session.settings, "deep_verify", False),
+            ).run()
 
         def done(report):
             btn.setEnabled(True)
             status.setText(f"↑{report.uploaded} ↓{report.downloaded} "
                            f"⌫{report.trashed_remote + report.trashed_local} "
-                           f"⚠{report.conflicts}")
+                           f"⚠{report.conflicts} skip {report.skipped}")
             status.setStyleSheet(f"font-size: 12px; color: {self._p.success};")
 
         def fail(msg):
