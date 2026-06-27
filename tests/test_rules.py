@@ -20,6 +20,14 @@ def test_can_include_hidden_when_enabled():
     assert not rules.is_excluded(Path('/tmp/project/.secret'), Path('/tmp/project'))
 
 
+def test_default_excludes_sqlite_sidecars():
+    rules = SyncRules()
+    root = Path('/tmp/project')
+    assert rules.is_excluded(root / 'state.db-journal', root)
+    assert rules.is_excluded(root / 'state.db-wal', root)
+    assert rules.is_excluded(root / 'state.db-shm', root)
+
+
 def test_delete_blocked():
     with pytest.raises(PermissionError):
         assert_no_delete_allowed()

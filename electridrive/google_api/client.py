@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import errno
 import logging
+import socket
+import ssl
+import time
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +41,17 @@ GOOGLE_EXPORT_FORMATS: dict[str, tuple[str, str]] = {
     "application/vnd.google-apps.drawing": ("image/png", ".png"),
 }
 DEFAULT_EXPORT: tuple[str, str] = ("application/pdf", ".pdf")
+UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+UPLOAD_HTTP_RETRIES = 3
+UPLOAD_TRANSPORT_RETRIES = 5
+RETRIABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+RETRIABLE_ERRNOS = {
+    errno.ECONNABORTED,
+    errno.ECONNREFUSED,
+    errno.ECONNRESET,
+    errno.EPIPE,
+    errno.ETIMEDOUT,
+}
 
 
 def export_format_for(mime_type: str | None) -> tuple[str, str]:
@@ -272,6 +287,15 @@ class GoogleDriveClient:
         remote_name: str,
         progress_cb: ProgressCB | None = None,
     ) -> str:
+        return self.upload_file_with_metadata(local_file, parent_id, remote_name, progress_cb).id
+
+    def upload_file_with_metadata(
+        self,
+        local_file: Path,
+        parent_id: str,
+        remote_name: str,
+        progress_cb: ProgressCB | None = None,
+    ) -> RemoteFile:
         try:
             from googleapiclient.http import MediaFileUpload
         except Exception as exc:  # pragma: no cover
@@ -281,16 +305,61 @@ class GoogleDriveClient:
 
         metadata = {"name": remote_name, "parents": [parent_id] if parent_id != "root" else []}
         total = local_file.stat().st_size
-        media = MediaFileUpload(str(local_file), resumable=True)
-        request = self.service.files().create(body=metadata, media_body=media, fields="id")
+        media = MediaFileUpload(str(local_file), chunksize=UPLOAD_CHUNK_SIZE, resumable=True)
+        request = self.service.files().create(body=metadata, media_body=media, fields=_FILE_FIELDS)
+        response = self._execute_resumable_upload(request, total, progress_cb)
+        return RemoteFile.from_api(response)
+
+    def _execute_resumable_upload(
+        self,
+        request,
+        total: int,
+        progress_cb: ProgressCB | None = None,
+    ) -> dict:
         response = None
+        transport_failures = 0
         while response is None:
-            status, response = request.next_chunk()
+            try:
+                status, response = request.next_chunk(num_retries=UPLOAD_HTTP_RETRIES)
+            except Exception as exc:
+                if (
+                    transport_failures >= UPLOAD_TRANSPORT_RETRIES
+                    or not self._is_retriable_upload_error(exc)
+                ):
+                    raise
+                transport_failures += 1
+                delay = min(30.0, 2 ** transport_failures)
+                LOGGER.warning(
+                    "Retrying resumable upload after transient transport error "
+                    "(attempt %s/%s): %s",
+                    transport_failures,
+                    UPLOAD_TRANSPORT_RETRIES,
+                    exc,
+                )
+                time.sleep(delay)
+                continue
+            transport_failures = 0
             if status and progress_cb:
                 progress_cb(int(status.resumable_progress), total)
         if progress_cb:
             progress_cb(total, total)
-        return response["id"]
+        return response
+
+    @staticmethod
+    def _is_retriable_upload_error(exc: Exception) -> bool:
+        if isinstance(exc, (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError)):
+            return True
+        if isinstance(exc, OSError):
+            return exc.errno in RETRIABLE_ERRNOS
+
+        resp = getattr(exc, "resp", None)
+        status = getattr(resp, "status", None)
+        if status in RETRIABLE_HTTP_STATUSES:
+            return True
+
+        # Some broken resumable-session responses surface as ResumableUploadError
+        # with HTTP 200 but no Location header. Starting the session again is safe.
+        return exc.__class__.__name__ == "ResumableUploadError" and status == 200
 
     def download_file(self, file_id: str, dest_path: Path, progress_cb: ProgressCB | None = None) -> Path:
         try:

@@ -26,6 +26,9 @@ DEFAULT_EXCLUDED_SUFFIXES = {
     ".crdownload",
     ".swp",
     ".bak~",
+    "-journal",
+    "-shm",
+    "-wal",
 }
 
 
