@@ -19,7 +19,7 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
 > → **[Latest AppImage or .deb](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)**
 > ```bash
 > chmod +x ElectriDrive-x86_64.AppImage && ./ElectriDrive-x86_64.AppImage
-> # …or:  sudo apt install ./electridrive_2.0.0_amd64.deb
+> # …or:  sudo apt install ./electridrive_2.1.0_amd64.deb
 > ```
 > Running from source is only for developers — see [Install → Option B](#install).
 >
@@ -38,11 +38,17 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
 - **Up & download** — upload files/folders (button or drag & drop), download anything,
   **export Google Docs/Sheets/Slides** to Office formats, all through a live **transfer
   queue** with progress, speed, ETA, cancel & retry.
-- **Two-way sync** — keep a local folder and a Drive folder in step using the efficient
-  Drive **Changes API**. Conflict-safe: the newer side wins and the other is kept as a
-  "(conflict …)" copy. **Deletions are never lost** — they go to Trash.
+- **Two-way sync** — keep a local folder and a Drive folder in step. Existing counterparts
+  are updated in place without changing their Drive IDs. Conflicts keep both versions, and
+  automated deletion uses only recoverable Trash locations. Every included descendant is
+  traversed, including nested empty directories, spaces, and Unicode names.
+- **Google Workspace sync exports** — Docs, Sheets, and Slides are exported to stable
+  `.docx`, `.xlsx`, and `.pptx` local paths instead of being silently skipped.
 - **Virtual Drive (FUSE)** — mount Drive as a folder with **files-on-demand**: files
-  download only when opened, then cache locally. No rclone.
+  download only when opened, then cache locally. Cached content is refreshed when its
+  remote checksum or modification time changes. Read-only in 2.1.0; no rclone.
+- **Update notifications** — a non-blocking check for newer stable ElectriDrive releases,
+  at most once every 24 hours, with downloads remaining entirely user-controlled.
 - **Designer UI** — bespoke Electric-Dark theme (light theme included), crisp vector icons,
   no third-party widget license required.
 - **Safety-first** — no permanent deletes in automated flows; everything recoverable via Trash.
@@ -64,7 +70,7 @@ chmod +x ElectriDrive-x86_64.AppImage
 ./ElectriDrive-x86_64.AppImage           # on FUSE3-only systems: ./ElectriDrive-x86_64.AppImage --appimage-extract-and-run
 
 # …or the .deb (installs to /opt + app-menu entry):
-sudo apt install ./electridrive_2.0.0_amd64.deb
+sudo apt install ./electridrive_2.1.0_amd64.deb
 
 # optional: verify the download
 sha256sum -c SHA256SUMS.txt
@@ -127,27 +133,95 @@ python -m electridrive.cli list --limit 20
 python -m electridrive.cli download <FILE_ID> ~/Downloads          # file or whole folder (Docs exported)
 python -m electridrive.cli sync-up ~/Documents --remote-folder "ElectriDrive/Backup"   # upload-only
 python -m electridrive.cli sync ~/Documents --remote-folder "ElectriDrive/Docs"        # two-way
+python -m electridrive.cli sync-configured                              # every enabled saved pair
 python -m electridrive.cli mount ~/ElectriDrive                     # files-on-demand mount (Ctrl+C to unmount)
 python -m electridrive.cli unmount ~/ElectriDrive
 ```
 
 ## Safety model
 
-- Two-way sync **never silently deletes**: a removed remote file is sent to **Drive Trash**;
-  a removed local file is moved to a local `.electridrive-trash` folder. Both recoverable.
-- Conflicts keep **both** versions (newer wins the canonical name).
-- The Virtual Drive is **read-only** by default; writing through the mount is experimental
-  and opt-in.
+- Automated sync never permanently deletes. Deleting a synced local binary moves its remote
+  counterpart to **Drive Trash**; deleting its remote counterpart moves the local file to
+  `.electridrive-trash`. Both operations are recoverable.
+- Conflicts keep **both** versions. A local winner updates the existing canonical Drive ID and
+  keeps the former remote content as a local `(conflict …)` copy; a remote winner preserves the
+  local content as the conflict copy before downloading the canonical remote file.
+- Native Google Workspace files are remote-authoritative exports. ElectriDrive never writes an
+  edited Office export back into a Doc, Sheet, or Slide and never converts native content.
+- The Virtual Drive is explicitly **read-only** in 2.1.0. Writable mounts are rejected
+  before mounting; unsafe partial-write semantics are not exposed.
 - Default excludes (sync/upload): `.git`, `node_modules`, `__pycache__`, `.venv`, caches,
-  temp files, hidden files (configurable).
+  temp files, hidden files, and `.electridrive-trash` (configurable). Excluded entries are
+  counted in sync reports. Descendant symlinks and special files are never followed.
+
+## Sync behavior in 2.1.0
+
+### Complete selected trees
+
+Each enabled sync pair is an independent scope boundary. ElectriDrive inventories included
+files **and directories** recursively, mirrors empty and nested-empty directory trees, and
+preserves relative hierarchy. Local traversal never follows descendant symlinks. Remote names
+are converted to safe single Linux path components; an ambiguous collision or incomplete scan
+is an explicit failed run, not a partial success.
+
+The Sync view's **Sync all** action and `sync-configured` CLI command execute every enabled
+saved pair in order. A failed pair is reported and later pairs still run. At the end of each
+successful pair, the executor compares required file/folder paths on both sides and records the
+complete folder mapping in SQLite. Any unexplained missing included path fails the run.
+
+### Create versus update
+
+Upload-only and two-way sync create a Drive file only when a local file has no remote
+counterpart. After the remote ID is recorded, later local modifications use Drive
+`files.update`, preserving that ID and its parent folder. Local-winner conflict resolution
+uses the same update path, so it does not create a second canonical remote file. Unchanged
+files remain no-ops on subsequent runs.
+
+### Google Workspace exports
+
+Two-way sync exports Docs to `.docx`, Sheets to `.xlsx`, and Slides to `.pptx`. Remote edits
+re-export the same stable local path. If the local export is edited, ElectriDrive preserves
+that edit as a `(conflict …)` copy and re-exports the native remote file as canonical. Deleting
+the local export restores it instead of trashing the native file. A native export and a real
+binary with the same resulting filename are both retained using a deterministic type suffix.
+
+These exports are intentionally one-way: ElectriDrive 2.1.0 does not import Office files back
+into native Google Workspace documents.
+
+### Changes API
+
+ElectriDrive persists a pair-scoped Drive Changes cursor. Within a running sync engine, a
+successful no-change response can reuse the already complete in-memory remote snapshot. Any
+reported change, missing snapshot, expired or invalid token, or Changes API error falls back to
+a full remote folder scan. A newly started process therefore still performs a full scan; 2.1.0
+does not claim full incremental reconciliation.
+
+## Update notifications and privacy
+
+ElectriDrive 2.1.0 checks the public GitHub Releases API asynchronously after startup, at most
+once every 24 hours. Only stable, non-draft releases from the official
+`ElectriCity-AI-Systems/electri-city-gdrive` repository are considered. Automatic network
+errors are debug-logged and otherwise silent, so startup and Drive access remain usable offline.
+
+The check sends no telemetry, device identifier, Google account information, license key, or
+usage statistics. **Download update** only opens the canonical official GitHub release page in
+the default browser; ElectriDrive does not download or execute an installer. Users can choose
+**Later**, skip reminders for one specific version, or run an explicit check from
+**Settings → About → Check for updates**. A manual check bypasses the 24-hour throttle and
+reports an available update, an up-to-date result, or a concise network error.
+
+> **Migration note:** ElectriDrive 2.0.0 did not contain an updater, so it cannot display an
+> in-app notification for 2.1.0. That first upgrade must be installed manually. From 2.1.0
+> onward, users can be notified automatically about future stable releases.
 
 ## Architecture (for contributors)
 
 ```
 electridrive/
-├── google_api/client.py   # Drive v3: list/download/export/upload/changes/about/trash
+├── google_api/client.py   # Drive v3: list/download/export/create/update/changes/about/trash
 ├── transfers/manager.py   # threaded, Qt-free upload/download queue
 ├── sync/                  # engine (upload-only), twoway.py (conflict-safe reconciler), downloader/uploader planners
+├── updater/               # Qt-free stable-release, SemVer, throttle and persistence logic
 ├── vfs/fuse_mount.py      # DriveTree (testable) + fusepy mount (lazy import)
 ├── ui/                    # Electric-Dark theme, sidebar shell, views (explorer/transfers/sync/vfs/settings)
 └── cli.py
@@ -160,7 +234,8 @@ transfer manager and FUSE tree are tested against an in-memory `FakeDrive` (`tes
 ## Development
 
 ```bash
-python -m pytest -q                                   # full suite (no Google/Qt/FUSE needed)
+python -m pytest -q                                   # no Google account, live network, or FUSE needed
+python -m compileall -q electridrive server tests     # compile smoke check
 QT_QPA_PLATFORM=offscreen python -m electridrive      # headless GUI smoke
 python scripts/make_icon.py                           # regenerate the app icon
 ```
@@ -211,6 +286,11 @@ ElectriDrive uses a **"pay what you want"** model via PayPal — undercutting ev
 
 Activation is **server-less**: keys are Ed25519-signed offline. You keep the private signing key;
 the app ships the matching public key and verifies keys with no license server.
+
+Starting with v2.1.0, the current production public key is checked first and the previous public
+key remains an accepted verification fallback. This rotation preserves existing licenses without
+shipping any private key material. Supplying `public_key_b64` directly to `licensing.verify()` is
+an exact single-key override; omitting it uses the current and legacy embedded public keys.
 
 ```bash
 # one-time: create your signing keypair (writes the private key to your config dir,

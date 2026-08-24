@@ -113,9 +113,16 @@ class FileListing:
 
 
 class DriveClientProtocol(Protocol):
+    def find_folder(self, name: str, parent_id: str | None = ...) -> str | None: ...
+    def find_file(self, name: str, parent_id: str) -> str | None: ...
+    def create_folder(self, name: str, parent_id: str | None = ...) -> str: ...
     def ensure_folder_path(self, remote_path: str) -> str: ...
     def upload_file(
         self, local_file: Path, parent_id: str, remote_name: str, progress_cb: ProgressCB | None = ...
+    ) -> str: ...
+    def update_file(
+        self, file_id: str, local_file: Path, remote_name: str | None = ...,
+        progress_cb: ProgressCB | None = ...
     ) -> str: ...
     def list_files(self, limit: int = 20) -> list[RemoteFile]: ...
     def list_folder(self, parent_id: str = "root", page_token: str | None = ...) -> FileListing: ...
@@ -193,11 +200,42 @@ class GoogleDriveClient:
         created = self.service.files().create(body=metadata, fields="id").execute()
         return created["id"]
 
+    def find_file(self, name: str, parent_id: str) -> str | None:
+        """Return an existing non-Workspace file with this exact parent/name.
+
+        Upload sync uses this before creating media so losing local state cannot
+        manufacture a duplicate Drive object. Native Workspace documents are
+        excluded because replacing one with binary media would destroy its type.
+        """
+        escaped = self._escape_query_text(name)
+        query = [
+            f"name = '{escaped}'",
+            f"'{parent_id}' in parents",
+            "trashed = false",
+        ]
+        response = self.service.files().list(
+            q=" and ".join(query),
+            spaces="drive",
+            fields="files(id, mimeType)",
+            pageSize=100,
+            orderBy="createdTime",
+        ).execute()
+        for item in response.get("files", []):
+            mime = item.get("mimeType") or ""
+            if mime != DRIVE_FOLDER_MIME and not mime.startswith(
+                "application/vnd.google-apps."
+            ):
+                return item["id"]
+        return None
+
     def ensure_folder_path(self, remote_path: str) -> str:
         parts = [p.strip() for p in remote_path.replace("\\", "/").split("/") if p.strip()]
         if not parts:
             return "root"
-        parent_id: str | None = None
+        # Always anchor the first component at My Drive's root.  An unparented
+        # name query is global and can otherwise select a same-named folder from
+        # an unrelated part of Drive.
+        parent_id = "root"
         current_id = "root"
         for part in parts:
             found = self.find_folder(part, parent_id)
@@ -291,6 +329,46 @@ class GoogleDriveClient:
         if progress_cb:
             progress_cb(total, total)
         return response["id"]
+
+    def update_file(
+        self,
+        file_id: str,
+        local_file: Path,
+        remote_name: str | None = None,
+        progress_cb: ProgressCB | None = None,
+    ) -> str:
+        """Replace an existing Drive file's media while preserving its ID.
+
+        Parents are deliberately omitted from the update metadata, so an update
+        cannot accidentally move the canonical file to another folder.
+        """
+        try:
+            from googleapiclient.http import MediaFileUpload
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Google API upload dependency missing. Run: pip install -r requirements.txt"
+            ) from exc
+
+        local_file = Path(local_file)
+        metadata = {"name": remote_name} if remote_name is not None else {}
+        total = local_file.stat().st_size
+        media = MediaFileUpload(str(local_file), resumable=True)
+        request = self.service.files().update(
+            fileId=file_id,
+            body=metadata,
+            media_body=media,
+            fields="id",
+        )
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status and progress_cb:
+                progress_cb(int(status.resumable_progress), total)
+        if progress_cb:
+            progress_cb(total, total)
+        # Drive updates retain identity.  Prefer the requested ID if an unusual
+        # test double omits it from the response.
+        return response.get("id", file_id)
 
     def download_file(self, file_id: str, dest_path: Path, progress_cb: ProgressCB | None = None) -> Path:
         try:

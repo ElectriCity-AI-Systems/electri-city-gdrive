@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "electridrive-linux"
-version = "2.0.0"
+version = "2.1.0"
 description = "Beautiful, safety-first Google Drive client for Linux — browse, sync and mount, without rclone"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "flask>=3.0"]
 
 [project.scripts]
 electridrive = "electridrive.cli:main"

@@ -4,15 +4,16 @@ The tree/cache logic lives in :class:`DriveTree` (pure, testable with FakeDrive)
 The FUSE binding (`fusepy`) is imported lazily inside :func:`create_operations_class`
 so importing this module never requires libfuse.
 
-Prototype scope: read + directory listing + on-demand download into a local cache.
-Google Docs are exported on first read. Writing through the mount is opt-in and
-experimental.
+Scope: read + directory listing + on-demand download into a local cache. Google
+Workspace files are exported on first read. The mount is intentionally read-only.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
+import tempfile
 import threading
 from datetime import datetime
 from itertools import count
@@ -48,6 +49,8 @@ class DriveTree:
         self.root_id = root_id
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._metadata_dir = self.cache_dir / ".metadata"
+        self._metadata_dir.mkdir(parents=True, exist_ok=True)
         self.ttl = ttl
         self._children: dict[str, tuple[float, dict]] = {}
 
@@ -95,31 +98,121 @@ class DriveTree:
     def cache_path(self, node) -> Path:
         return self.cache_dir / node.id
 
-    def ensure_cached(self, node) -> Path:
-        """Download/export the file into the cache on first access."""
-        dest = self.cache_path(node)
-        if dest.exists():
-            return dest
+    def _cache_metadata_path(self, node) -> Path:
+        return self._metadata_dir / f"{node.id}.json"
+
+    @staticmethod
+    def _cache_identity(node) -> dict[str, str] | None:
+        """Return the strongest available immutable identity for cached bytes.
+
+        Drive supplies ``md5Checksum`` for ordinary binary files. Google Workspace
+        files do not have one, so their ``modifiedTime`` is the safe fallback. A
+        missing identity deliberately disables reuse rather than making a cache
+        entry permanent.
+        """
+        if node.md5_checksum:
+            identity_type = "md5Checksum"
+            identity_value = node.md5_checksum
+        elif node.modified_time:
+            identity_type = "modifiedTime"
+            identity_value = node.modified_time
+        else:
+            return None
+
+        identity = {
+            "identity_type": identity_type,
+            "identity_value": identity_value,
+            "mime_type": node.mime_type or "",
+        }
         if node.is_google_doc:
             from electridrive.google_api.client import export_format_for
-            mime, _ext = export_format_for(node.mime_type)
-            self.client.export_file(node.id, dest, mime)
-        else:
-            self.client.download_file(node.id, dest)
+
+            export_mime, _ext = export_format_for(node.mime_type)
+            identity["export_mime"] = export_mime
+        return identity
+
+    def _cached_identity(self, node) -> dict[str, str] | None:
+        try:
+            value = json.loads(self._cache_metadata_path(node).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def cache_is_current(self, node) -> bool:
+        """Return whether cached bytes are validated for this metadata snapshot."""
+        identity = self._cache_identity(node)
+        return (
+            identity is not None
+            and self.cache_path(node).is_file()
+            and self._cached_identity(node) == identity
+        )
+
+    def _write_cache_identity(self, node, identity: dict[str, str]) -> None:
+        metadata_path = self._cache_metadata_path(node)
+        metadata_tmp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._metadata_dir,
+                prefix=f".{node.id}.",
+                suffix=".tmp",
+                delete=False,
+            ) as fp:
+                metadata_tmp = Path(fp.name)
+                json.dump(identity, fp, sort_keys=True)
+            metadata_tmp.replace(metadata_path)
+        except Exception:
+            if metadata_tmp is not None:
+                metadata_tmp.unlink(missing_ok=True)
+            raise
+
+    def ensure_cached(self, node) -> Path:
+        """Return bytes matching the current remote identity, refreshing if needed."""
+        dest = self.cache_path(node)
+        identity = self._cache_identity(node)
+        if self.cache_is_current(node):
+            return dest
+
+        # Download to the cache filesystem and replace atomically. If a network or
+        # export error occurs, an older valid cache entry remains intact.
+        with tempfile.NamedTemporaryFile(
+            dir=self.cache_dir,
+            prefix=f".{node.id}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fp:
+            download_tmp = Path(fp.name)
+        try:
+            if node.is_google_doc:
+                from electridrive.google_api.client import export_format_for
+
+                mime, _ext = export_format_for(node.mime_type)
+                self.client.export_file(node.id, download_tmp, mime)
+            else:
+                self.client.download_file(node.id, download_tmp)
+            download_tmp.replace(dest)
+            if identity is not None:
+                self._write_cache_identity(node, identity)
+        except Exception:
+            download_tmp.unlink(missing_ok=True)
+            raise
         return dest
 
 
 def create_operations_class():
     """Build the fusepy Operations subclass (lazy import of libfuse binding)."""
     import errno
+    import os
     import stat as statmod
 
     from fuse import FuseOSError, Operations
 
     class ElectriDriveFS(Operations):
         def __init__(self, tree: DriveTree, writable: bool = False):
+            if writable:
+                raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.0")
             self.tree = tree
-            self.writable = writable
             self._fh = count(1)
             self._open: dict[int, object] = {}
 
@@ -127,17 +220,21 @@ def create_operations_class():
         def getattr(self, path, fh=None):
             now = time()
             if path == "/":
-                return dict(st_mode=(statmod.S_IFDIR | 0o755), st_nlink=2,
+                return dict(st_mode=(statmod.S_IFDIR | 0o555), st_nlink=2,
                             st_ctime=now, st_mtime=now, st_atime=now)
             node = self.tree.resolve(path)
             if node is None:
                 raise FuseOSError(errno.ENOENT)
             if node.is_folder:
-                return dict(st_mode=(statmod.S_IFDIR | 0o755), st_nlink=2,
+                return dict(st_mode=(statmod.S_IFDIR | 0o555), st_nlink=2,
                             st_ctime=now, st_mtime=now, st_atime=now)
-            mode = 0o644 if self.writable else 0o444
+            mode = 0o444
             cached = self.tree.cache_path(node)
-            size = cached.stat().st_size if cached.exists() else (node.size or 4096)
+            size = (
+                cached.stat().st_size
+                if self.tree.cache_is_current(node)
+                else (node.size or 4096)
+            )
             mt = _parse_iso(node.modified_time)
             return dict(st_mode=(statmod.S_IFREG | mode), st_nlink=1, st_size=size,
                         st_ctime=mt, st_mtime=mt, st_atime=now)
@@ -148,7 +245,18 @@ def create_operations_class():
             for f in self.tree.list_dir(path):
                 yield f.name
 
+        def access(self, path, mode):
+            if mode & os.W_OK:
+                raise FuseOSError(errno.EROFS)
+            if path != "/" and self.tree.resolve(path) is None:
+                raise FuseOSError(errno.ENOENT)
+            return 0
+
         def open(self, path, flags):
+            if (flags & os.O_ACCMODE) != os.O_RDONLY or flags & (
+                os.O_CREAT | os.O_TRUNC | os.O_APPEND
+            ):
+                raise FuseOSError(errno.EROFS)
             node = self.tree.resolve(path)
             if node is None:
                 raise FuseOSError(errno.ENOENT)
@@ -175,11 +283,12 @@ def create_operations_class():
                 handle.close()
             return 0
 
-        # ---- writes denied in the read-only prototype ----
+        # ---- mutation operations are always denied ----
         def _readonly(self, *args, **kwargs):
             raise FuseOSError(errno.EROFS)
 
-        create = unlink = mkdir = rmdir = rename = truncate = write = _readonly
+        chmod = chown = create = link = mkdir = mknod = removexattr = _readonly
+        rename = rmdir = setxattr = symlink = truncate = unlink = utimens = write = _readonly
 
     return ElectriDriveFS
 
@@ -198,6 +307,8 @@ class FuseMount:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self, mountpoint: str, remote_folder: str = "", writable: bool = False):
+        if writable:
+            raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.0")
         if self.is_mounted:
             raise RuntimeError("Already mounted")
         if not fuse_available():
@@ -213,8 +324,7 @@ class FuseMount:
 
         def run():
             try:
-                FUSE(fs_cls(tree, writable), str(mp), foreground=True,
-                     nothreads=True, ro=not writable)
+                FUSE(fs_cls(tree), str(mp), foreground=True, nothreads=True, ro=True)
             except Exception:
                 LOGGER.exception("FUSE mount exited with error")
 

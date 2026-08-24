@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 DEFAULT_EXCLUDED_NAMES = {
     ".git",
@@ -13,6 +14,7 @@ DEFAULT_EXCLUDED_NAMES = {
     "__pycache__",
     ".mypy_cache",
     ".pytest_cache",
+    ".electridrive-trash",
     "tmp",
     "temp",
     "trash",
@@ -36,7 +38,14 @@ class SyncRules:
     excluded_suffixes: set[str] = field(default_factory=lambda: set(DEFAULT_EXCLUDED_SUFFIXES))
     max_file_size_bytes: int | None = None
 
-    def is_excluded(self, path: Path, root: Path | None = None) -> bool:
+    def is_excluded(
+        self,
+        path: Path,
+        root: Path | None = None,
+        *,
+        is_file: bool | None = None,
+        size: int | None = None,
+    ) -> bool:
         parts = path.parts
         if root is not None:
             try:
@@ -44,21 +53,53 @@ class SyncRules:
             except ValueError:
                 parts = path.parts
 
+        return self.is_excluded_parts(
+            parts,
+            is_file=path.is_file() if is_file is None else is_file,
+            size=size,
+            path=path,
+        )
+
+    def is_excluded_relative(
+        self,
+        relative_path: str,
+        *,
+        is_file: bool,
+        size: int | None = None,
+    ) -> bool:
+        """Apply the same rules to a remote path without touching local disk."""
+        return self.is_excluded_parts(
+            Path(relative_path).parts,
+            is_file=is_file,
+            size=size,
+        )
+
+    def is_excluded_parts(
+        self,
+        parts: Iterable[str],
+        *,
+        is_file: bool,
+        size: int | None = None,
+        path: Path | None = None,
+    ) -> bool:
+        parts = tuple(parts)
         for part in parts:
             if part in self.excluded_names:
                 return True
             if not self.include_hidden and part.startswith("."):
                 return True
 
-        name = path.name
+        name = parts[-1] if parts else ""
         if any(name.endswith(suffix) for suffix in self.excluded_suffixes):
             return True
 
-        if path.is_file() and self.max_file_size_bytes is not None:
-            try:
-                if path.stat().st_size > self.max_file_size_bytes:
+        if is_file and self.max_file_size_bytes is not None:
+            if size is None and path is not None:
+                try:
+                    size = path.stat().st_size
+                except OSError:
                     return True
-            except OSError:
+            if size is not None and size > self.max_file_size_bytes:
                 return True
         return False
 

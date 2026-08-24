@@ -5,7 +5,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -47,7 +46,8 @@ class VfsView(QWidget):
         head.addWidget(badge)
         intro.v.addLayout(head)
         desc = QLabel("Mount your Drive as a folder. Files download only when you open "
-                      "them, then cache locally. Backed by FUSE — no rclone, no full sync.")
+                      "them, then cache locally. The mount is read-only in ElectriDrive "
+                      "2.1.0. Backed by FUSE — no rclone, no full sync.")
         desc.setWordWrap(True)
         desc.setProperty("role", "muted")
         intro.v.addWidget(desc)
@@ -78,9 +78,6 @@ class VfsView(QWidget):
         rf_row.addWidget(self.remote_input, 1)
         cfg.v.addLayout(rf_row)
 
-        self.writable = QCheckBox("Allow writing through the mount (experimental)")
-        self.writable.setChecked(session.settings.vfs_writable)
-        cfg.v.addWidget(self.writable)
         root.addWidget(cfg)
 
         status_card = Card()
@@ -155,11 +152,9 @@ class VfsView(QWidget):
             QMessageBox.warning(self, "Not connected", "Connect to Drive first.")
             return
         self._session.settings.mountpoint = self.mp_input.text().strip()
-        self._session.settings.vfs_writable = self.writable.isChecked()
         self._session.save()
         try:
-            mount.start(self.mp_input.text().strip(), self.remote_input.text().strip(),
-                        self.writable.isChecked())
+            mount.start(self.mp_input.text().strip(), self.remote_input.text().strip())
             self._refresh()
         except Exception as exc:
             QMessageBox.warning(self, "Mount failed", str(exc))

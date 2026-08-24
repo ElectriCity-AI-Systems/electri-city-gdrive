@@ -4,7 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from electridrive.config import SyncPair, get_paths, selected_scopes
+from electridrive.config import SyncPair, get_paths, load_settings, selected_scopes
 from electridrive.google_api.client import GoogleDriveClient
 from electridrive.logging_setup import configure_logging
 from electridrive.storage.database import SyncDatabase
@@ -72,6 +72,27 @@ def cmd_sync(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_sync_configured(args: argparse.Namespace) -> int:
+    from electridrive.sync.runner import run_configured_pairs
+
+    paths = get_paths()
+    db = SyncDatabase(paths.database_file)
+    try:
+        result = run_configured_pairs(
+            GoogleDriveClient(), db, load_settings().sync_pairs, log_cb=print
+        )
+        print(
+            f"Configured sync complete. configured={result.configured_pairs} "
+            f"enabled={result.enabled_pairs} successful={result.successful_pairs} "
+            f"failed={result.failed_pairs}"
+        )
+        for error in result.errors:
+            print(f"  ! {error}")
+        return 0 if result.failed_pairs == 0 else 2
+    finally:
+        db.close()
+
+
 def cmd_download(args: argparse.Namespace) -> int:
     client = GoogleDriveClient()
     remote = client.get_metadata(args.file_id)
@@ -94,13 +115,19 @@ def cmd_download(args: argparse.Namespace) -> int:
 def cmd_mount(args: argparse.Namespace) -> int:
     from electridrive.vfs import FuseMount, fuse_available
 
+    if getattr(args, "writable", False):
+        print(
+            "Writable mounts are not supported in ElectriDrive 2.1.0; "
+            "Virtual Drive is read-only."
+        )
+        return 2
     if not fuse_available():
         print("FUSE is not available (need libfuse + fusermount).")
         return 1
     paths = get_paths()
     mount = FuseMount(GoogleDriveClient(), paths.vfs_cache_dir)
-    mount.start(args.mountpoint, args.remote_folder or "", writable=args.writable)
-    print(f"Mounted Drive at {args.mountpoint}. Press Ctrl+C to unmount.")
+    mount.start(args.mountpoint, args.remote_folder or "")
+    print(f"Mounted Drive read-only at {args.mountpoint}. Press Ctrl+C to unmount.")
     try:
         mount.wait()
     except KeyboardInterrupt:
@@ -144,6 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
                         default="two_way")
     p_sync.set_defaults(func=cmd_sync)
 
+    sub.add_parser(
+        "sync-configured", help="Sync every enabled pair saved in settings"
+    ).set_defaults(func=cmd_sync_configured)
+
     p_dl = sub.add_parser("download", help="Download a file/folder by Drive file id")
     p_dl.add_argument("file_id")
     p_dl.add_argument("dest")
@@ -152,7 +183,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_mount = sub.add_parser("mount", help="Mount Drive as a virtual filesystem (no rclone)")
     p_mount.add_argument("mountpoint")
     p_mount.add_argument("--remote-folder", default="")
-    p_mount.add_argument("--writable", action="store_true", help="experimental")
+    # Retain a hidden compatibility flag only to reject old writable-mount commands
+    # with an explicit safety message before touching FUSE or the mountpoint.
+    p_mount.add_argument("--writable", action="store_true", help=argparse.SUPPRESS)
     p_mount.set_defaults(func=cmd_mount)
 
     p_un = sub.add_parser("unmount", help="Unmount the virtual filesystem")

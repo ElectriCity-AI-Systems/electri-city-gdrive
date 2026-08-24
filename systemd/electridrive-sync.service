@@ -1,5 +1,5 @@
 [Unit]
-Description=ElectriDrive Linux Safe Upload Sync
+Description=ElectriDrive Selected Folder Sync
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=oneshot
 # Edit these paths to where you cloned the repo (the folder containing app.py).
 WorkingDirectory=%h/electri-city-gdrive
-ExecStart=%h/electri-city-gdrive/.venv/bin/python -m electridrive.cli sync-up %h/Dokumente --remote-folder ElectriDrive/LinuxBackup
+Environment="PATH=%h/electri-city-gdrive/.venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=/usr/bin/env python -m electridrive.cli sync-configured
 Nice=10
 IOSchedulingClass=best-effort
 
