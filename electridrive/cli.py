@@ -117,7 +117,7 @@ def cmd_mount(args: argparse.Namespace) -> int:
 
     if getattr(args, "writable", False):
         print(
-            "Writable mounts are not supported in ElectriDrive 2.1.0; "
+            "Writable mounts are not supported in ElectriDrive 2.1.1; "
             "Virtual Drive is read-only."
         )
         return 2

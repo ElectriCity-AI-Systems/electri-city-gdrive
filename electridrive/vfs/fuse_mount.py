@@ -211,7 +211,7 @@ def create_operations_class():
     class ElectriDriveFS(Operations):
         def __init__(self, tree: DriveTree, writable: bool = False):
             if writable:
-                raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.0")
+                raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.1")
             self.tree = tree
             self._fh = count(1)
             self._open: dict[int, object] = {}
@@ -308,7 +308,7 @@ class FuseMount:
 
     def start(self, mountpoint: str, remote_folder: str = "", writable: bool = False):
         if writable:
-            raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.0")
+            raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.1")
         if self.is_mounted:
             raise RuntimeError("Already mounted")
         if not fuse_available():

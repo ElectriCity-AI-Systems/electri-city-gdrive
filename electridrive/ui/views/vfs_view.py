@@ -47,7 +47,7 @@ class VfsView(QWidget):
         intro.v.addLayout(head)
         desc = QLabel("Mount your Drive as a folder. Files download only when you open "
                       "them, then cache locally. The mount is read-only in ElectriDrive "
-                      "2.1.0. Backed by FUSE — no rclone, no full sync.")
+                      "2.1.1. Backed by FUSE — no rclone, no full sync.")
         desc.setWordWrap(True)
         desc.setProperty("role", "muted")
         intro.v.addWidget(desc)
