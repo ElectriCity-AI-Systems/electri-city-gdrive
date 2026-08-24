@@ -29,7 +29,9 @@ class FakeDrive:
                      "trashed": False, "starred": False}
         }
         self.uploads: list[tuple] = []
+        self.updates: list[tuple] = []
         self.changes: list[RemoteChange] = []
+        self.change_requests: list[str] = []
 
     # --------------------------------------------------------------- test setup
     def _nid(self, prefix: str) -> str:
@@ -40,6 +42,7 @@ class FakeDrive:
         self.nodes[nid] = {"id": nid, "name": name, "mime": DRIVE_FOLDER_MIME,
                            "parent": parent, "content": None, "modified": "2024-01-01T00:00:00Z",
                            "trashed": False, "starred": False}
+        self._record_change(nid)
         return nid
 
     def add_file(self, name: str, content: bytes = b"data", parent: str = "root",
@@ -49,17 +52,42 @@ class FakeDrive:
         self.nodes[nid] = {"id": nid, "name": name, "mime": mime, "parent": parent,
                            "content": content, "modified": modified,
                            "trashed": False, "starred": starred}
+        self._record_change(nid)
         return nid
+
+    def modify_file(
+        self,
+        file_id: str,
+        content: bytes,
+        *,
+        modified: str = "2024-01-02T00:00:00Z",
+    ) -> None:
+        """Test helper that models an external edit and emits a Drive change."""
+        node = self.nodes[file_id]
+        node["content"] = content
+        node["modified"] = modified
+        self._record_change(file_id)
+
+    def _record_change(self, file_id: str, *, removed: bool = False) -> None:
+        self.changes.append(
+            RemoteChange(
+                file_id=file_id,
+                removed=removed,
+                file=None if removed else self._to_remote(self.nodes[file_id]),
+            )
+        )
 
     def _to_remote(self, node: dict) -> RemoteFile:
         content = node["content"]
+        is_workspace = node["mime"].startswith("application/vnd.google-apps.")
         return RemoteFile(
             id=node["id"], name=node["name"], mime_type=node["mime"],
             size=(len(content) if content is not None else None),
             modified_time=node["modified"],
             parents=tuple([node["parent"]] if node["parent"] else []),
             trashed=node["trashed"], starred=node["starred"],
-            md5_checksum=(_md5(content) if content is not None else None),
+            # Native Workspace documents do not expose md5Checksum in Drive v3.
+            md5_checksum=(_md5(content) if content is not None and not is_workspace else None),
         )
 
     # ----------------------------------------------------------------- protocol
@@ -88,6 +116,25 @@ class FakeDrive:
         if progress_cb:
             progress_cb(len(data), len(data))
         return nid
+
+    def update_file(
+        self,
+        file_id: str,
+        local_file: Path,
+        remote_name: str | None = None,
+        progress_cb=None,
+    ) -> str:
+        data = Path(local_file).read_bytes()
+        node = self.nodes[file_id]
+        node["content"] = data
+        if remote_name is not None:
+            node["name"] = remote_name
+        node["modified"] = "2024-01-02T00:00:00Z"
+        self.updates.append((file_id, str(local_file), remote_name))
+        self._record_change(file_id)
+        if progress_cb:
+            progress_cb(len(data), len(data))
+        return file_id
 
     def download_file(self, file_id: str, dest_path: Path, progress_cb=None) -> Path:
         node = self.nodes[file_id]
@@ -129,10 +176,15 @@ class FakeDrive:
                             user_email="tester@example.com", user_name="Tester")
 
     def get_start_page_token(self) -> str:
-        return "tok-0"
+        return f"tok-{len(self.changes)}"
 
     def list_changes(self, page_token: str):
-        return list(self.changes), None, "tok-next"
+        self.change_requests.append(page_token)
+        if not page_token.startswith("tok-"):
+            raise ValueError(f"invalid change token: {page_token}")
+        offset = int(page_token.removeprefix("tok-"))
+        return list(self.changes[offset:]), None, f"tok-{len(self.changes)}"
 
     def trash(self, file_id: str) -> None:
         self.nodes[file_id]["trashed"] = True
+        self._record_change(file_id, removed=True)

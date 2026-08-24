@@ -98,7 +98,19 @@ class UploadOnlySyncEngine:
                     )
                     remote_path = f"{folder_path}/{relative.name}"
 
-                remote_id = self.drive_client.upload_file(file_path, parent_id, file_path.name)
+                previous = self.database.get_file(str(file_path))
+                if previous is None:
+                    remote_id = self.drive_client.upload_file(
+                        file_path, parent_id, file_path.name
+                    )
+                    operation = "Uploaded"
+                else:
+                    # The database's remote ID is the canonical identity.  A
+                    # changed local file replaces that file's media instead of
+                    # creating another same-named Drive object.
+                    self.drive_client.update_file(previous.remote_id, file_path)
+                    remote_id = previous.remote_id
+                    operation = "Updated"
                 stat = file_path.stat()
                 self.database.upsert_file(
                     local_path=str(file_path),
@@ -110,7 +122,7 @@ class UploadOnlySyncEngine:
                     status="uploaded",
                 )
                 result.uploaded += 1
-                self._log(f"Uploaded: {relative}")
+                self._log(f"{operation}: {relative}")
             except Exception as exc:  # keep sync robust per file
                 result.failed += 1
                 error = f"Failed {file_path}: {exc}"

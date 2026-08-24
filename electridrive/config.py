@@ -3,16 +3,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
+_SETTINGS_LOCK = threading.RLock()
 
 APP_ID = "electridrive"
 APP_NAME = "ElectriDrive"
 APP_TAGLINE = "Electric-City Drive for Linux"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 DEFAULT_SCOPE = "https://www.googleapis.com/auth/drive.file"
 FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
@@ -139,9 +141,10 @@ class Settings:
     default_remote_folder: str = "ElectriDrive"
     sync_pairs: list[SyncPair] = field(default_factory=list)
     mountpoint: str = str(Path.home() / "ElectriDrive")
-    vfs_writable: bool = False  # writing through the FUSE mount is experimental
     cache_limit_mb: int = 4096
     last_remote_folder_id: str = "root"
+    last_update_check: str = ""
+    dismissed_update_version: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
@@ -157,18 +160,23 @@ class Settings:
 
 def load_settings() -> Settings:
     path = get_paths().settings_file
-    if not path.exists():
-        return Settings()
-    try:
-        return Settings.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    except Exception as exc:  # corrupt settings should never crash the app
-        LOGGER.warning("Could not read settings, using defaults: %s", exc)
-        return Settings()
+    with _SETTINGS_LOCK:
+        if not path.exists():
+            return Settings()
+        try:
+            return Settings.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except Exception as exc:  # corrupt settings should never crash the app
+            LOGGER.warning("Could not read settings, using defaults: %s", exc)
+            return Settings()
 
 
 def save_settings(settings: Settings) -> None:
     path = get_paths().settings_file
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(settings.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    with _SETTINGS_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(settings.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp.replace(path)

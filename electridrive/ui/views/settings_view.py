@@ -24,6 +24,7 @@ from electridrive.ui.widgets import Card, format_size, open_pro_url
 class SettingsView(QWidget):
     theme_changed = Signal(str)
     reconnect_requested = Signal()
+    check_updates_requested = Signal()
 
     def __init__(self, session, palette: Palette):
         super().__init__()
@@ -241,4 +242,14 @@ class SettingsView(QWidget):
         text.setWordWrap(True)
         text.setProperty("role", "muted")
         card.v.addWidget(text)
+        self._update_button = QPushButton("Check for updates")
+        self._update_button.setProperty("ghost", True)
+        self._update_button.clicked.connect(
+            lambda _checked=False: self.check_updates_requested.emit()
+        )
+        card.v.addWidget(self._update_button, alignment=Qt.AlignLeft)
         return card
+
+    def set_update_checking(self, checking: bool) -> None:
+        self._update_button.setEnabled(not checking)
+        self._update_button.setText("Checking…" if checking else "Check for updates")

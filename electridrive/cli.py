@@ -94,13 +94,19 @@ def cmd_download(args: argparse.Namespace) -> int:
 def cmd_mount(args: argparse.Namespace) -> int:
     from electridrive.vfs import FuseMount, fuse_available
 
+    if getattr(args, "writable", False):
+        print(
+            "Writable mounts are not supported in ElectriDrive 2.1.0; "
+            "Virtual Drive is read-only."
+        )
+        return 2
     if not fuse_available():
         print("FUSE is not available (need libfuse + fusermount).")
         return 1
     paths = get_paths()
     mount = FuseMount(GoogleDriveClient(), paths.vfs_cache_dir)
-    mount.start(args.mountpoint, args.remote_folder or "", writable=args.writable)
-    print(f"Mounted Drive at {args.mountpoint}. Press Ctrl+C to unmount.")
+    mount.start(args.mountpoint, args.remote_folder or "")
+    print(f"Mounted Drive read-only at {args.mountpoint}. Press Ctrl+C to unmount.")
     try:
         mount.wait()
     except KeyboardInterrupt:
@@ -152,7 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_mount = sub.add_parser("mount", help="Mount Drive as a virtual filesystem (no rclone)")
     p_mount.add_argument("mountpoint")
     p_mount.add_argument("--remote-folder", default="")
-    p_mount.add_argument("--writable", action="store_true", help="experimental")
+    # Retain a hidden compatibility flag only to reject old writable-mount commands
+    # with an explicit safety message before touching FUSE or the mountpoint.
+    p_mount.add_argument("--writable", action="store_true", help=argparse.SUPPRESS)
     p_mount.set_defaults(func=cmd_mount)
 
     p_un = sub.add_parser("unmount", help="Unmount the virtual filesystem")

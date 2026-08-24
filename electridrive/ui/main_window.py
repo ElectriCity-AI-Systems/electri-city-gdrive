@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -19,6 +19,7 @@ from electridrive.config import APP_TAGLINE
 from electridrive.ui import icons
 from electridrive.ui.session import DriveSession
 from electridrive.ui.theme import build_qss, get_palette
+from electridrive.ui.update_controller import UpdateController
 from electridrive.ui.views.explorer_view import ExplorerView
 from electridrive.ui.views.login_view import LoginView
 from electridrive.ui.views.settings_view import SettingsView
@@ -71,7 +72,12 @@ class MainWindow(QMainWindow):
         session.connect_failed.connect(self._on_connect_failed)
         session.log.connect(self.set_status)
 
+        self.update_controller = UpdateController(session, self)
+
         self._show_login()
+        # Enter the event loop and paint the main window before any update network
+        # work is scheduled.  The controller then uses the shared worker pool.
+        QTimer.singleShot(0, self.update_controller.start_automatic_check)
         # Auto-connect silently if we already have a cached token (no browser needed).
         if session.has_token():
             self._start_connect()
@@ -223,6 +229,9 @@ class MainWindow(QMainWindow):
         settings = SettingsView(self.session, self.palette_)
         settings.theme_changed.connect(self._apply_theme)
         settings.reconnect_requested.connect(self._reauthenticate)
+        settings.check_updates_requested.connect(self.update_controller.check_manually)
+        self.update_controller.checking_changed.connect(settings.set_update_checking)
+        settings.set_update_checking(self.update_controller.is_checking)
         self.views["settings"] = settings
 
         for key, view in self.views.items():
