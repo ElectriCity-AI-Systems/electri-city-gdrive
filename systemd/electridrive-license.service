@@ -1,0 +1,32 @@
+[Unit]
+Description=ElectriDrive Pro license delivery (PayPal IPN)
+Documentation=file:/opt/electridrive-license/app/server/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=electridrive-license
+Group=electridrive-license
+WorkingDirectory=/opt/electridrive-license/app/server
+EnvironmentFile=/etc/electridrive-license.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/electridrive-license/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8012 license_server:create_app()
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+StateDirectory=electridrive-license
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
