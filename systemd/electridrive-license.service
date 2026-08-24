@@ -11,7 +11,7 @@ Group=electridrive-license
 WorkingDirectory=/opt/electridrive-license/app/server
 EnvironmentFile=/etc/electridrive-license.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/electridrive-license/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8012 license_server:create_app()
+ExecStart=/opt/electridrive-license/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8012 --no-control-socket license_server:create_app()
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
