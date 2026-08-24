@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "flask>=3.0"]
 
 [project.scripts]
 electridrive = "electridrive.cli:main"
