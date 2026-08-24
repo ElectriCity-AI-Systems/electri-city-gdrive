@@ -271,6 +271,11 @@ ElectriDrive uses a **"pay what you want"** model via PayPal — undercutting ev
 Activation is **server-less**: keys are Ed25519-signed offline. You keep the private signing key;
 the app ships the matching public key and verifies keys with no license server.
 
+Starting with v2.1.0, the current production public key is checked first and the previous public
+key remains an accepted verification fallback. This rotation preserves existing licenses without
+shipping any private key material. Supplying `public_key_b64` directly to `licensing.verify()` is
+an exact single-key override; omitting it uses the current and legacy embedded public keys.
+
 ```bash
 # one-time: create your signing keypair (writes the private key to your config dir,
 # prints the public key to embed in electridrive/licensing.py PUBLIC_KEY_B64)

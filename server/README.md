@@ -22,6 +22,10 @@ export MAIL_FROM="ElectriDrive <noreply@electri-city.studio>"
 export PROCESSED_FILE=/var/lib/electridrive/processed.txt
 ```
 
+For v2.1.0 and later, the server must issue new licenses with the private key matching the
+current `PUBLIC_KEY_B64`. Keep that key outside the repository. The application retains the
+previous public key only as a verification fallback for licenses issued before the rotation.
+
 ## 3. Run
 ```bash
 pip install -r server/requirements.txt
