@@ -98,6 +98,19 @@ class FakeDrive:
                     return n["id"]
         return None
 
+    def find_file(self, name: str, parent_id: str) -> str | None:
+        for node in self.nodes.values():
+            mime = node["mime"]
+            if (
+                node["name"] == name
+                and node["parent"] == parent_id
+                and not node["trashed"]
+                and mime != DRIVE_FOLDER_MIME
+                and not mime.startswith("application/vnd.google-apps.")
+            ):
+                return node["id"]
+        return None
+
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
         return self.add_folder(name, parent_id or "root")
 

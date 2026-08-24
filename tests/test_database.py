@@ -30,3 +30,20 @@ def test_folder_map(tmp_path: Path):
         assert db.get_folder_id('sub') == 'folder123'
     finally:
         db.close()
+
+
+def test_pair_scoped_folder_state_is_replaced_atomically(tmp_path: Path):
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        db.replace_sync_folders("pair-a", {"Empty": "folder-1", "A/B": "folder-2"})
+        db.replace_sync_folders("pair-b", {"Empty": "other-folder"})
+        db.replace_sync_folders("pair-a", {"A/B": "folder-2"})
+
+        assert [(item.local_rel, item.remote_id) for item in db.list_sync_folders("pair-a")] == [
+            ("A/B", "folder-2")
+        ]
+        assert [(item.local_rel, item.remote_id) for item in db.list_sync_folders("pair-b")] == [
+            ("Empty", "other-folder")
+        ]
+    finally:
+        db.close()

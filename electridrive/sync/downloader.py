@@ -43,11 +43,16 @@ def plan_download(client, remote: RemoteFile, dest_dir: Path) -> list[DownloadIt
     Folders are walked recursively; Google Workspace docs are marked for export.
     `client` only needs `.list_folder(parent_id, page_token)` -> FileListing.
     """
-    dest_dir = Path(dest_dir)
+    dest_dir = Path(dest_dir).expanduser()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if dest_dir.is_symlink():
+        raise ValueError(f"Download destination must not be a symlink: {dest_dir}")
+    dest_dir = dest_dir.resolve()
     items: list[DownloadItem] = []
 
     if not remote.is_folder:
         path, is_doc, export_mime = _dest_for(remote, dest_dir)
+        _reject_symlink_path(dest_dir, path)
         items.append(
             DownloadItem(
                 file_id=remote.id,
@@ -62,19 +67,53 @@ def plan_download(client, remote: RemoteFile, dest_dir: Path) -> list[DownloadIt
 
     # Folder: create a subdirectory named after it and recurse.
     folder_dir = dest_dir / sanitize_name(remote.name)
-    _walk_folder(client, remote.id, folder_dir, items)
+    _reject_symlink_path(dest_dir, folder_dir)
+    folder_dir.mkdir(parents=True, exist_ok=True)
+    _walk_folder(client, remote.id, folder_dir, items, {remote.id})
     return items
 
 
-def _walk_folder(client, folder_id: str, folder_dir: Path, items: list[DownloadItem]) -> None:
+def _reject_symlink_path(root: Path, candidate: Path) -> None:
+    current = root
+    for part in candidate.relative_to(root).parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"Refusing to traverse symlink in download tree: {candidate}")
+
+
+def _walk_folder(
+    client,
+    folder_id: str,
+    folder_dir: Path,
+    items: list[DownloadItem],
+    visited: set[str],
+) -> None:
     page_token: str | None = None
+    names: set[str] = set()
     while True:
         listing = client.list_folder(folder_id, page_token)
         for child in listing.files:
+            safe_name = sanitize_name(child.name)
+            if child.is_google_doc:
+                _mime, extension = export_format_for(child.mime_type)
+                if not safe_name.lower().endswith(extension):
+                    safe_name = f"{safe_name}{extension}"
+            if safe_name in names:
+                raise ValueError(
+                    f"Remote names collide at {folder_dir}: {safe_name!r}"
+                )
+            names.add(safe_name)
             if child.is_folder:
-                _walk_folder(client, child.id, folder_dir / sanitize_name(child.name), items)
+                if child.id in visited:
+                    raise ValueError(f"Remote folder cycle detected at {child.name!r}")
+                child_dir = folder_dir / safe_name
+                _reject_symlink_path(folder_dir, child_dir)
+                child_dir.mkdir(parents=True, exist_ok=True)
+                visited.add(child.id)
+                _walk_folder(client, child.id, child_dir, items, visited)
             else:
                 path, is_doc, export_mime = _dest_for(child, folder_dir)
+                _reject_symlink_path(folder_dir, path)
                 items.append(
                     DownloadItem(
                         file_id=child.id,

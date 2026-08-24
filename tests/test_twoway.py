@@ -198,7 +198,9 @@ def test_local_winner_conflict_updates_canonical_remote_without_duplicate(tmp_pa
         report = engine.run()
 
         assert report.conflicts == 1 and report.failed == 0
-        assert len(fake.uploads) == 1
+        # Initial canonical upload plus the preserved remote conflict copy. The
+        # latter is synchronized in the same run instead of being left local-only.
+        assert len(fake.uploads) == 2
         assert fake.updates[-1][0] == original.remote_id
         canonical = [
             n for n in fake.nodes.values()
@@ -210,6 +212,13 @@ def test_local_winner_conflict_updates_canonical_remote_without_duplicate(tmp_pa
         conflict_files = list(root.glob("a (conflict *).txt"))
         assert len(conflict_files) == 1
         assert conflict_files[0].read_bytes() == b"remote edit"
+        conflict_remote = [
+            node
+            for node in fake.nodes.values()
+            if node["name"] == conflict_files[0].name and not node["trashed"]
+        ]
+        assert len(conflict_remote) == 1
+        assert conflict_remote[0]["content"] == b"remote edit"
     finally:
         db.close()
 
@@ -283,7 +292,11 @@ def test_workspace_remote_edit_reexports_and_local_edit_is_preserved(tmp_path: P
         assert len(preserved) == 1
         assert preserved[0].read_bytes() == b"local Office edit"
         assert fake.nodes[native_id]["content"] == b"remote-v2"
-        assert fake.uploads == [] and fake.updates == []
+        # The edited export is retained as a separate binary conflict object;
+        # the native Workspace file itself is never media-updated.
+        assert fake.updates == []
+        assert len(fake.uploads) == 1
+        assert fake.uploads[0][2] == preserved[0].name
     finally:
         db.close()
 

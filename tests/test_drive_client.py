@@ -76,3 +76,43 @@ def test_update_file_uses_drive_update_and_preserves_id(tmp_path: Path):
     # rename the canonical Drive object.
     assert client.update_file("canonical-id", source) == "canonical-id"
     assert service.files_api.update_kwargs["body"] == {}
+
+
+def test_find_file_reuses_only_binary_media_in_the_exact_parent():
+    class Files:
+        def __init__(self):
+            self.kwargs = None
+
+        def list(self, **kwargs):
+            self.kwargs = kwargs
+            return _Response(
+                {
+                    "files": [
+                        {
+                            "id": "folder-id",
+                            "mimeType": "application/vnd.google-apps.folder",
+                        },
+                        {
+                            "id": "native-id",
+                            "mimeType": "application/vnd.google-apps.document",
+                        },
+                        {"id": "binary-id", "mimeType": "text/plain"},
+                    ]
+                }
+            )
+
+    class Service:
+        def __init__(self):
+            self.files_api = Files()
+
+        def files(self):
+            return self.files_api
+
+    service = Service()
+    client = GoogleDriveClient(service=service)
+
+    assert client.find_file("report.txt", "parent-id") == "binary-id"
+    query = service.files_api.kwargs["q"]
+    assert "name = 'report.txt'" in query
+    assert "'parent-id' in parents" in query
+    assert "trashed = false" in query

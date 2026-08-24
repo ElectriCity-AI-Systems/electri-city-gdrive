@@ -43,6 +43,12 @@ class SyncView(QWidget):
                       "Deletions go to Trash — never lost.")
         info.setProperty("role", "muted")
         bar.addWidget(info, 1)
+        sync_all = QPushButton("Sync all")
+        sync_all.setProperty("ghost", True)
+        sync_all.setIcon(icons.icon("sync", palette.text, 18))
+        sync_all.setCursor(Qt.PointingHandCursor)
+        sync_all.clicked.connect(lambda: self._sync_all(sync_all))
+        bar.addWidget(sync_all)
         add = QPushButton("  Add sync pair")
         add.setProperty("accent", True)
         add.setIcon(icons.icon("plus", palette.accent_text, 18))
@@ -123,13 +129,62 @@ class SyncView(QWidget):
             status.setText(f"↑{report.uploaded} ↓{report.downloaded} "
                            f"⌫{report.trashed_remote + report.trashed_local} "
                            f"⚠{report.conflicts}")
-            status.setStyleSheet(f"font-size: 12px; color: {self._p.success};")
+            if report.failed or report.unexplained_omissions:
+                status.setText(f"Failed ({report.failed})")
+                status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
+                QMessageBox.warning(
+                    self,
+                    "Sync incomplete",
+                    "\n".join(report.errors) or "The completeness assertion failed.",
+                )
+            else:
+                status.setStyleSheet(f"font-size: 12px; color: {self._p.success};")
 
         def fail(msg):
             btn.setEnabled(True)
             status.setText("Failed")
             status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
             QMessageBox.warning(self, "Sync failed", msg)
+
+        self._session.submit(work, done, fail)
+
+    def _sync_all(self, btn: QPushButton):
+        if not self._session.client:
+            return
+        btn.setEnabled(False)
+        btn.setText("Syncing all…")
+
+        def work():
+            from electridrive.sync.runner import run_configured_pairs
+
+            return run_configured_pairs(
+                self._session.client,
+                self._session.db,
+                self._session.settings.sync_pairs,
+            )
+
+        def done(result):
+            btn.setEnabled(True)
+            btn.setText("Sync all")
+            if result.failed_pairs:
+                detail = "\n".join(result.errors[:8])
+                QMessageBox.warning(
+                    self,
+                    "Some sync pairs failed",
+                    f"Completed {result.successful_pairs} of {result.enabled_pairs} "
+                    f"enabled pairs.\n\n{detail}",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Sync complete",
+                    f"All {result.successful_pairs} enabled sync pairs completed.",
+                )
+
+        def fail(msg):
+            btn.setEnabled(True)
+            btn.setText("Sync all")
+            QMessageBox.warning(self, "Sync all failed", msg)
 
         self._session.submit(work, done, fail)
 

@@ -40,7 +40,8 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
   queue** with progress, speed, ETA, cancel & retry.
 - **Two-way sync** — keep a local folder and a Drive folder in step. Existing counterparts
   are updated in place without changing their Drive IDs. Conflicts keep both versions, and
-  automated deletion uses only recoverable Trash locations.
+  automated deletion uses only recoverable Trash locations. Every included descendant is
+  traversed, including nested empty directories, spaces, and Unicode names.
 - **Google Workspace sync exports** — Docs, Sheets, and Slides are exported to stable
   `.docx`, `.xlsx`, and `.pptx` local paths instead of being silently skipped.
 - **Virtual Drive (FUSE)** — mount Drive as a folder with **files-on-demand**: files
@@ -132,6 +133,7 @@ python -m electridrive.cli list --limit 20
 python -m electridrive.cli download <FILE_ID> ~/Downloads          # file or whole folder (Docs exported)
 python -m electridrive.cli sync-up ~/Documents --remote-folder "ElectriDrive/Backup"   # upload-only
 python -m electridrive.cli sync ~/Documents --remote-folder "ElectriDrive/Docs"        # two-way
+python -m electridrive.cli sync-configured                              # every enabled saved pair
 python -m electridrive.cli mount ~/ElectriDrive                     # files-on-demand mount (Ctrl+C to unmount)
 python -m electridrive.cli unmount ~/ElectriDrive
 ```
@@ -149,9 +151,23 @@ python -m electridrive.cli unmount ~/ElectriDrive
 - The Virtual Drive is explicitly **read-only** in 2.1.0. Writable mounts are rejected
   before mounting; unsafe partial-write semantics are not exposed.
 - Default excludes (sync/upload): `.git`, `node_modules`, `__pycache__`, `.venv`, caches,
-  temp files, hidden files (configurable).
+  temp files, hidden files, and `.electridrive-trash` (configurable). Excluded entries are
+  counted in sync reports. Descendant symlinks and special files are never followed.
 
 ## Sync behavior in 2.1.0
+
+### Complete selected trees
+
+Each enabled sync pair is an independent scope boundary. ElectriDrive inventories included
+files **and directories** recursively, mirrors empty and nested-empty directory trees, and
+preserves relative hierarchy. Local traversal never follows descendant symlinks. Remote names
+are converted to safe single Linux path components; an ambiguous collision or incomplete scan
+is an explicit failed run, not a partial success.
+
+The Sync view's **Sync all** action and `sync-configured` CLI command execute every enabled
+saved pair in order. A failed pair is reported and later pairs still run. At the end of each
+successful pair, the executor compares required file/folder paths on both sides and records the
+complete folder mapping in SQLite. Any unexplained missing included path fails the run.
 
 ### Create versus update
 

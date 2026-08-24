@@ -4,7 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from electridrive.config import SyncPair, get_paths, selected_scopes
+from electridrive.config import SyncPair, get_paths, load_settings, selected_scopes
 from electridrive.google_api.client import GoogleDriveClient
 from electridrive.logging_setup import configure_logging
 from electridrive.storage.database import SyncDatabase
@@ -68,6 +68,27 @@ def cmd_sync(args: argparse.Namespace) -> int:
         for err in report.errors:
             print(f"  ! {err}")
         return 0 if report.failed == 0 else 2
+    finally:
+        db.close()
+
+
+def cmd_sync_configured(args: argparse.Namespace) -> int:
+    from electridrive.sync.runner import run_configured_pairs
+
+    paths = get_paths()
+    db = SyncDatabase(paths.database_file)
+    try:
+        result = run_configured_pairs(
+            GoogleDriveClient(), db, load_settings().sync_pairs, log_cb=print
+        )
+        print(
+            f"Configured sync complete. configured={result.configured_pairs} "
+            f"enabled={result.enabled_pairs} successful={result.successful_pairs} "
+            f"failed={result.failed_pairs}"
+        )
+        for error in result.errors:
+            print(f"  ! {error}")
+        return 0 if result.failed_pairs == 0 else 2
     finally:
         db.close()
 
@@ -149,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--direction", choices=["two_way", "up_only", "down_only"],
                         default="two_way")
     p_sync.set_defaults(func=cmd_sync)
+
+    sub.add_parser(
+        "sync-configured", help="Sync every enabled pair saved in settings"
+    ).set_defaults(func=cmd_sync_configured)
 
     p_dl = sub.add_parser("download", help="Download a file/folder by Drive file id")
     p_dl.add_argument("file_id")

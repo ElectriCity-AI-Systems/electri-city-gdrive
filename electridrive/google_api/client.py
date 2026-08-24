@@ -113,6 +113,9 @@ class FileListing:
 
 
 class DriveClientProtocol(Protocol):
+    def find_folder(self, name: str, parent_id: str | None = ...) -> str | None: ...
+    def find_file(self, name: str, parent_id: str) -> str | None: ...
+    def create_folder(self, name: str, parent_id: str | None = ...) -> str: ...
     def ensure_folder_path(self, remote_path: str) -> str: ...
     def upload_file(
         self, local_file: Path, parent_id: str, remote_name: str, progress_cb: ProgressCB | None = ...
@@ -196,6 +199,34 @@ class GoogleDriveClient:
             metadata["parents"] = [parent_id]
         created = self.service.files().create(body=metadata, fields="id").execute()
         return created["id"]
+
+    def find_file(self, name: str, parent_id: str) -> str | None:
+        """Return an existing non-Workspace file with this exact parent/name.
+
+        Upload sync uses this before creating media so losing local state cannot
+        manufacture a duplicate Drive object. Native Workspace documents are
+        excluded because replacing one with binary media would destroy its type.
+        """
+        escaped = self._escape_query_text(name)
+        query = [
+            f"name = '{escaped}'",
+            f"'{parent_id}' in parents",
+            "trashed = false",
+        ]
+        response = self.service.files().list(
+            q=" and ".join(query),
+            spaces="drive",
+            fields="files(id, mimeType)",
+            pageSize=100,
+            orderBy="createdTime",
+        ).execute()
+        for item in response.get("files", []):
+            mime = item.get("mimeType") or ""
+            if mime != DRIVE_FOLDER_MIME and not mime.startswith(
+                "application/vnd.google-apps."
+            ):
+                return item["id"]
+        return None
 
     def ensure_folder_path(self, remote_path: str) -> str:
         parts = [p.strip() for p in remote_path.replace("\\", "/").split("/") if p.strip()]

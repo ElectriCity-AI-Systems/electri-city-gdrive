@@ -35,6 +35,16 @@ class SyncItem:
 
 
 @dataclass(frozen=True)
+class SyncFolder:
+    """A synchronized directory in one configured pair."""
+
+    pair_id: str
+    local_rel: str
+    remote_id: str
+    updated_at: float
+
+
+@dataclass(frozen=True)
 class TransferRecord:
     id: int
     kind: str
@@ -109,6 +119,14 @@ class SyncDatabase:
                     sha256 TEXT NOT NULL,
                     remote_modified TEXT NOT NULL,
                     remote_md5 TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (pair_id, local_rel)
+                );
+
+                CREATE TABLE IF NOT EXISTS sync_folders (
+                    pair_id TEXT NOT NULL,
+                    local_rel TEXT NOT NULL,
+                    remote_id TEXT NOT NULL,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (pair_id, local_rel)
                 );
@@ -271,6 +289,32 @@ class SyncDatabase:
         with self._lock:
             self._conn.execute(
                 "DELETE FROM sync_items WHERE pair_id=? AND local_rel=?", (pair_id, local_rel)
+            )
+            self._conn.commit()
+
+    # ----------------------------------------------------------- sync folders
+    def list_sync_folders(self, pair_id: str) -> list[SyncFolder]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM sync_folders WHERE pair_id=? ORDER BY local_rel",
+                (pair_id,),
+            ).fetchall()
+        return [SyncFolder(**dict(row)) for row in rows]
+
+    def replace_sync_folders(self, pair_id: str, folders: dict[str, str]) -> None:
+        """Atomically store the complete current directory mapping for a pair."""
+        now = time()
+        with self._lock:
+            self._conn.execute("DELETE FROM sync_folders WHERE pair_id=?", (pair_id,))
+            self._conn.executemany(
+                """
+                INSERT INTO sync_folders(pair_id, local_rel, remote_id, updated_at)
+                VALUES(?,?,?,?)
+                """,
+                [
+                    (pair_id, local_rel, remote_id, now)
+                    for local_rel, remote_id in sorted(folders.items())
+                ],
             )
             self._conn.commit()
 
