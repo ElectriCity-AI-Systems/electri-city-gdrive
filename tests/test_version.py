@@ -12,4 +12,4 @@ def test_release_version_is_consistent():
     match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
 
     assert match is not None
-    assert APP_VERSION == electridrive.__version__ == match.group(1) == "2.1.0"
+    assert APP_VERSION == electridrive.__version__ == match.group(1) == "2.1.1"
