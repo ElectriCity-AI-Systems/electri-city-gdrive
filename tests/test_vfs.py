@@ -195,7 +195,7 @@ def test_fuse_operations_are_always_read_only(tmp_path: Path, monkeypatch):
     _fake, tree = _tree(tmp_path)
     fs_class = create_operations_class()
 
-    with pytest.raises(ValueError, match="read-only in version 2.1.0"):
+    with pytest.raises(ValueError, match="read-only in version 2.1.1"):
         fs_class(tree, writable=True)
 
     fs = fs_class(tree)
@@ -220,7 +220,7 @@ def test_writable_mount_is_rejected_before_mount_side_effects(tmp_path: Path, mo
         pytest.fail("writable mode must fail before checking or starting FUSE")
 
     monkeypatch.setattr("electridrive.vfs.fuse_mount.fuse_available", fuse_must_not_be_checked)
-    with pytest.raises(ValueError, match="read-only in version 2.1.0"):
+    with pytest.raises(ValueError, match="read-only in version 2.1.1"):
         mount.start(str(mountpoint), writable=True)
     assert not mountpoint.exists()
     assert not mount.is_mounted

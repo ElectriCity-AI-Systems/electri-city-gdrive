@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.1 — 2026-08-24
+
+### Changed
+
+- Production Linux AppImage and Debian builds use the built-in Google Desktop OAuth client,
+  allowing end users to sign in without creating their own `credentials.json`.
+- Version bumped from 2.1.0 to 2.1.1 so existing 2.1.0 installations can discover this
+  production distribution through ElectriDrive's update checker.
+- No synchronization, licensing, or data-format compatibility changes.
+
 ## 2.1.0 — 2026-08-24
 
 ### Fixed
