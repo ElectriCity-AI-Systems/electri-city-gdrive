@@ -100,6 +100,7 @@ jobs:
           test "$status" -eq 124
 
           # shellcheck disable=SC2016
+          QT_QPA_PLATFORM=xcb \
           XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" \
           XDG_CACHE_HOME="$profile/cache" \
@@ -108,7 +109,12 @@ jobs:
               gtk-launch electridrive >menu.out 2>menu.err &
               launcher=$!
               sleep 5
-              pgrep -x electridrive
+              if ! pgrep -x electridrive; then
+                cat menu.out menu.err >&2
+                ps -eo pid,ppid,comm,args >&2
+                wait "$launcher" 2>/dev/null || true
+                exit 1
+              fi
               pkill -TERM -x electridrive
               wait "$launcher" 2>/dev/null || true
             '
