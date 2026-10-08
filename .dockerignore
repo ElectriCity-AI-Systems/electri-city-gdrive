@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+build
+dist
+__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+electridrive/google_api/client_baked.json
+app_client.json
+credentials.json
+token.json
+license_signing_key.pem
+*private*key*.pem

@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.1.2 — 2026-10-08
+
+### Fixed
+
+- The Debian desktop launcher now runs the packaged `electridrive` executable and declares
+  the same command in `TryExec`; v2.1.1 incorrectly requested the absent `electridrive-gui`.
+- Official Linux packages are built on Ubuntu 22.04 and reject ELF dependencies newer than
+  GLIBC 2.35, avoiding the accidental GLIBC 2.43 requirement in the v2.1.1 package.
+
+### Packaging
+
+- Debian builds now verify package metadata, desktop launcher targets, executable bits,
+  bundled Qt runtime/plugins, GLIBC symbol versions, and the intended baked OAuth client.
+- Debian metadata now declares the external EGL, OpenGL, and Wayland libraries required by Qt.
+- Release dependency versions are pinned and the Debian package check runs in CI.
+- No synchronization, OAuth flow, licensing, or data-format behavior changes.
+
 ## 2.1.1 — 2026-08-24
 
 ### Changed

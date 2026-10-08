@@ -9,15 +9,27 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PY="${PY:-.venv/bin/python}"
 VERSION="$("$PY" -c 'from electridrive.config import APP_VERSION; print(APP_VERSION)')"
+MAX_GLIBC_VERSION="${MAX_GLIBC_VERSION:-2.35}"
 
-"$PY" -m pip install --quiet --upgrade pyinstaller
+"$PY" -c 'import PyInstaller' >/dev/null || {
+  echo "PyInstaller is missing; install packaging/requirements-release.txt first." >&2
+  exit 1
+}
 
 BAKED=electridrive/google_api/client_baked.json
+BAKED_CLIENT=0
+trap 'rm -f "$BAKED"' EXIT
 if [ -n "${ELECTRIDRIVE_CLIENT_ID:-}" ]; then
   "$PY" scripts/bake_client.py
+  BAKED_CLIENT=1
+elif [ -n "${ELECTRIDRIVE_APP_CLIENT_FILE:-}" ] && [ -f "$ELECTRIDRIVE_APP_CLIENT_FILE" ]; then
+  cp "$ELECTRIDRIVE_APP_CLIENT_FILE" "$BAKED"
+  echo "Baked client from ELECTRIDRIVE_APP_CLIENT_FILE (values not displayed)"
+  BAKED_CLIENT=1
 elif [ -f "$HOME/.config/electridrive/app_client.json" ]; then
   cp "$HOME/.config/electridrive/app_client.json" "$BAKED"
-  echo "Baked client from ~/.config/electridrive/app_client.json"
+  echo "Baked client from the user config (values not displayed)"
+  BAKED_CLIENT=1
 else
   echo "WARN: no client to bake — build ships the placeholder client." >&2
 fi
@@ -57,13 +69,16 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libfuse3-3 | fuse3
+Depends: libfuse3-3 | fuse3, libegl1, libgl1, libwayland-cursor0, libwayland-egl1
 Maintainer: Pierre Stephan / Electri_C_ity Studios
 Description: ElectriDrive - Electric-City Drive for Linux
  Beautiful, safety-first Google Drive client: browse, up/download,
  two-way sync and a FUSE files-on-demand mount. Without rclone.
 EOF
 dpkg-deb --build --root-owner-group "$ROOT"
+VERIFY_ARGS=("$ROOT.deb" --expected-version "$VERSION" --max-glibc "$MAX_GLIBC_VERSION")
+[ "$BAKED_CLIENT" -eq 1 ] && VERIFY_ARGS+=(--require-baked-client)
+"$PY" scripts/verify_deb.py "${VERIFY_ARGS[@]}"
 
 # ---- flat artifacts + checksums (release-ready) ----
 cp "$ROOT.deb" "dist/electridrive_${VERSION}_amd64.deb"

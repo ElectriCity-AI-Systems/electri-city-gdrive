@@ -19,7 +19,7 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
 > → **[Latest AppImage or .deb](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)**
 > ```bash
 > chmod +x ElectriDrive-x86_64.AppImage && ./ElectriDrive-x86_64.AppImage
-> # …or:  sudo apt install ./electridrive_2.1.1_amd64.deb
+> # …or:  sudo apt install ./electridrive_2.1.2_amd64.deb
 > ```
 > Running from source is only for developers — see [Install → Option B](#install).
 >
@@ -46,7 +46,7 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
   `.docx`, `.xlsx`, and `.pptx` local paths instead of being silently skipped.
 - **Virtual Drive (FUSE)** — mount Drive as a folder with **files-on-demand**: files
   download only when opened, then cache locally. Cached content is refreshed when its
-  remote checksum or modification time changes. Read-only in 2.1.1; no rclone.
+  remote checksum or modification time changes. Read-only in 2.1.2; no rclone.
 - **Update notifications** — a non-blocking check for newer stable ElectriDrive releases,
   at most once every 24 hours, with downloads remaining entirely user-controlled.
 - **Designer UI** — bespoke Electric-Dark theme (light theme included), crisp vector icons,
@@ -70,7 +70,7 @@ chmod +x ElectriDrive-x86_64.AppImage
 ./ElectriDrive-x86_64.AppImage           # on FUSE3-only systems: ./ElectriDrive-x86_64.AppImage --appimage-extract-and-run
 
 # …or the .deb (installs to /opt + app-menu entry):
-sudo apt install ./electridrive_2.1.1_amd64.deb
+sudo apt install ./electridrive_2.1.2_amd64.deb
 
 # optional: verify the download
 sha256sum -c SHA256SUMS.txt
@@ -148,7 +148,7 @@ python -m electridrive.cli unmount ~/ElectriDrive
   local content as the conflict copy before downloading the canonical remote file.
 - Native Google Workspace files are remote-authoritative exports. ElectriDrive never writes an
   edited Office export back into a Doc, Sheet, or Slide and never converts native content.
-- The Virtual Drive is explicitly **read-only** in 2.1.1. Writable mounts are rejected
+- The Virtual Drive is explicitly **read-only** in 2.1.2. Writable mounts are rejected
   before mounting; unsafe partial-write semantics are not exposed.
 - Default excludes (sync/upload): `.git`, `node_modules`, `__pycache__`, `.venv`, caches,
   temp files, hidden files, and `.electridrive-trash` (configurable). Excluded entries are
@@ -255,9 +255,14 @@ bash scripts/build_appimage.sh        # -> dist/ElectriDrive-x86_64.AppImage
 
 # 2b) .deb (installs into /opt, adds a menu launcher):
 bash scripts/build_deb.sh             # -> dist/deb/electridrive_<ver>_amd64.deb
+
+# Reproducible official .deb baseline (Docker, pinned Ubuntu 22.04 image/dependencies):
+bash scripts/build_deb_in_container.sh # -> dist/electridrive_<ver>_amd64.deb + SHA256SUMS.txt
 ```
 
 Both scripts auto-bake the client if `ELECTRIDRIVE_CLIENT_ID` is set when you run them.
+Official amd64 packages are built with the pinned release dependencies on Ubuntu 22.04
+(GLIBC 2.35), then checked so newer build hosts cannot silently raise that baseline.
 The PyInstaller spec is `packaging/electridrive.spec`. FUSE (Virtual Drive) needs
 `libfuse3` on the user's machine (the `.deb` declares it as a dependency).
 
