@@ -5,7 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PY="${PY:-.venv/bin/python}"
 
-"$PY" -m pip install --quiet --upgrade pyinstaller
+"$PY" -c 'import PyInstaller' >/dev/null || {
+  echo "PyInstaller is missing; install packaging/requirements-release.txt first." >&2
+  exit 1
+}
 [ -n "${ELECTRIDRIVE_CLIENT_ID:-}" ] && "$PY" scripts/bake_client.py || true
 
 rm -rf build dist

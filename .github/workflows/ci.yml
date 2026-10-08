@@ -52,3 +52,70 @@ jobs:
           electridrive.sync.twoway, electridrive.vfs.fuse_mount,
           electridrive.updater.update_checker, electridrive.ui.app,
           electridrive.ui.update_controller, server.license_server"
+
+  debian-package:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install package build tools and Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils dbus-x11 desktop-file-utils libegl1 libgl1 libgtk-3-bin libxkbcommon-x11-0 libxcb-cursor0 procps xauth xvfb
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: packaging/requirements-release.txt
+
+      - name: Install pinned release dependencies
+        run: python -m pip install --requirement packaging/requirements-release.txt
+
+      - name: Build and verify Debian package on the GLIBC 2.35 baseline
+        env:
+          PY: python
+          MAX_GLIBC_VERSION: "2.35"
+        run: bash scripts/build_deb.sh
+
+      - name: Install and launch the built package from terminal and desktop entry
+        run: |
+          sudo apt-get install -y ./dist/deb/electridrive_*_amd64.deb
+          profile="$(mktemp -d)"
+          mkdir -p "$profile/config" "$profile/state" "$profile/cache" "$profile/runtime"
+          chmod 700 "$profile/runtime"
+
+          set +e
+          QT_QPA_PLATFORM=offscreen \
+          XDG_CONFIG_HOME="$profile/config" \
+          XDG_STATE_HOME="$profile/state" \
+          XDG_CACHE_HOME="$profile/cache" \
+          XDG_RUNTIME_DIR="$profile/runtime" \
+            timeout 5 /usr/bin/electridrive
+          status=$?
+          set -e
+          test "$status" -eq 124
+
+          # shellcheck disable=SC2016
+          XDG_CONFIG_HOME="$profile/config" \
+          XDG_STATE_HOME="$profile/state" \
+          XDG_CACHE_HOME="$profile/cache" \
+          XDG_RUNTIME_DIR="$profile/runtime" \
+            dbus-run-session -- xvfb-run -a bash -euo pipefail -c '
+              gtk-launch electridrive >menu.out 2>menu.err &
+              launcher=$!
+              sleep 5
+              pgrep -x electridrive
+              pkill -TERM -x electridrive
+              wait "$launcher" 2>/dev/null || true
+            '
+
+      - name: Upload verified Debian package
+        uses: actions/upload-artifact@v6
+        with:
+          name: electridrive-debian-${{ github.sha }}
+          path: dist/deb/*.deb
+          if-no-files-found: error
