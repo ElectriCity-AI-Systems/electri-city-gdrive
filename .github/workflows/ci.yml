@@ -72,7 +72,7 @@ jobs:
       - name: Install desktop launch test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y dbus-x11 desktop-file-utils libgtk-3-bin procps xauth xvfb
+          sudo apt-get install -y dbus-x11 desktop-file-utils libgtk-3-bin procps x11-utils xauth xvfb
 
       - name: Build and verify Debian package on the GLIBC 2.35 baseline
         env:
@@ -111,8 +111,10 @@ jobs:
           XDG_STATE_HOME="$profile/state" \
           XDG_CACHE_HOME="$profile/cache" \
           XDG_RUNTIME_DIR="$profile/runtime" \
-            dbus-run-session -- xvfb-run -a bash -euo pipefail -c '
-              gtk-launch electridrive >menu.out 2>menu.err &
+            xvfb-run -a dbus-run-session -- bash -euo pipefail -c '
+              # The session bus must inherit the X display and its auth file.
+              xdpyinfo >/dev/null
+              QT_DEBUG_PLUGINS=1 gtk-launch electridrive >menu.out 2>menu.err &
               launcher=$!
               sleep 5
               if ! pgrep -x electridrive; then
