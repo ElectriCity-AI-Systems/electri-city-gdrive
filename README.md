@@ -275,6 +275,11 @@ on Ubuntu 22.04), plus a mount helper from `fuse3` or `fuse`. The Debian package
 declares both. FUSE 3's library alone does not satisfy `fusepy`.
 New builds support `electridrive --doctor` to check the packaged FUSE binding
 without opening the GUI or signing in; a real mount also requires `/dev/fuse`.
+Linux packages also use the host GLib/GIO runtime (`libglib2.0-0t64` or
+`libglib2.0-0`) and its dependencies, so desktop modules from newer distributions
+can load their matching system libraries. Package verification rejects bundled
+copies of this native library family, and CI probes GIO plus desktop launch on
+Ubuntu 22.04 and 24.04.
 
 ## Automatic license delivery
 

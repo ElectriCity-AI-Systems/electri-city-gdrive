@@ -1,6 +1,7 @@
 # PyInstaller spec for ElectriDrive (GUI).
 # Build from the repo root: pyinstaller --noconfirm packaging/electridrive.spec
 import os
+from fnmatch import fnmatch
 from PyInstaller.utils.hooks import collect_all
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
@@ -31,6 +32,20 @@ a = Analysis(
     excludes=["tkinter", "matplotlib", "PyQt5", "PyQt6", "grpc"],
     noarchive=False,
 )
+# GIO loads desktop modules from the host. Bundled GLib or its ABI-linked
+# dependencies can shadow newer host libraries and break dconf/GVfs modules.
+# Keep the complete native GLib dependency family on the host instead.
+system_desktop_libraries = (
+    "libglib-2.0.so*", "libgobject-2.0.so*", "libgio-2.0.so*",
+    "libgmodule-2.0.so*", "libgthread-2.0.so*", "libpcre.so*",
+    "libpcre2-8.so*", "libffi.so*", "libmount.so*", "libselinux.so*",
+    "libblkid.so*", "libz.so*",
+)
+a.binaries = [
+    entry for entry in a.binaries
+    if not any(fnmatch(os.path.basename(entry[0]), pattern)
+               for pattern in system_desktop_libraries)
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

@@ -59,7 +59,11 @@ jobs:
           assert fuse_available(), 'FUSE 2 library and mount helper are required'"
 
   debian-package:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
 
     steps:
       - name: Check out repository
@@ -81,6 +85,8 @@ jobs:
           profile="$(mktemp -d)"
           mkdir -p "$profile/config" "$profile/state" "$profile/cache" "$profile/runtime"
           chmod 700 "$profile/runtime"
+
+          python3 scripts/check_desktop_runtime.py /opt/electridrive/_internal
 
           XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" \
@@ -122,6 +128,6 @@ jobs:
       - name: Upload verified Debian package
         uses: actions/upload-artifact@v6
         with:
-          name: electridrive-debian-${{ github.sha }}
+          name: electridrive-debian-${{ matrix.os }}-${{ github.sha }}
           path: dist/electridrive_*_amd64.deb
           if-no-files-found: error

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from fnmatch import fnmatch
 import json
 import os
 import re
@@ -36,10 +37,17 @@ REQUIRED_QT_FILES = (
 REQUIRED_DEPENDENCY_GROUPS = (
     ("libfuse2t64", "libfuse2"),
     ("fuse3", "fuse"),
+    ("libglib2.0-0t64", "libglib2.0-0"),
     ("libegl1",),
     ("libgl1",),
     ("libwayland-cursor0",),
     ("libwayland-egl1",),
+)
+SYSTEM_DESKTOP_LIBRARIES = (
+    "libglib-2.0.so*", "libgobject-2.0.so*", "libgio-2.0.so*",
+    "libgmodule-2.0.so*", "libgthread-2.0.so*", "libpcre.so*",
+    "libpcre2-8.so*", "libffi.so*", "libmount.so*", "libselinux.so*",
+    "libblkid.so*", "libz.so*",
 )
 
 
@@ -295,6 +303,16 @@ def verify(
         qt_errors, qt_notes = _verify_qt(root)
         errors.extend(qt_errors)
         notes.extend(qt_notes)
+
+        shadowing = sorted(
+            str(path.relative_to(root)) for path in root.rglob("*")
+            if (path.is_file() or path.is_symlink())
+            and any(fnmatch(path.name, pattern) for pattern in SYSTEM_DESKTOP_LIBRARIES)
+        )
+        if shadowing:
+            errors.append("bundled desktop runtime libraries shadow the host: " + ", ".join(shadowing))
+        else:
+            notes.append("GLib/GIO and their native dependencies use the host runtime")
 
         requirements, glibc_errors = _glibc_requirements(root)
         errors.extend(glibc_errors)

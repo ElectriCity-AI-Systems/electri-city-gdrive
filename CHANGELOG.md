@@ -10,6 +10,10 @@
   the partial download. Existing file permissions are preserved.
 - Debian packages declare the FUSE 2 library required by fusepy, together with a
   mount helper. FUSE 3 alone is no longer accepted by the package verifier.
+- Linux bundles use the host GLib/GIO dependency family so newer dconf and GVfs
+  desktop modules do not fail with undefined symbols. Debian packages declare the
+  host GLib runtime; CI probes desktop modules and launches packages on Ubuntu
+  22.04 and 24.04.
 - Download instructions distinguish the current Debian release from the older
   v2.1.1 AppImage.
 

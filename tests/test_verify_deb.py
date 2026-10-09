@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFY = ROOT / "scripts" / "verify_deb.py"
@@ -13,9 +15,10 @@ VERIFY = ROOT / "scripts" / "verify_deb.py"
 def _package(
     tmp_path: Path, exec_name: str, install_target: bool,
     depends: str = (
-        "libfuse2t64 | libfuse2, fuse3 | fuse, libegl1, libgl1, "
+        "libfuse2t64 | libfuse2, fuse3 | fuse, libglib2.0-0t64 | libglib2.0-0, libegl1, libgl1, "
         "libwayland-cursor0, libwayland-egl1"
     ),
+    extra_library: str | None = None,
 ) -> Path:
     root = tmp_path / "root"
     (root / "DEBIAN").mkdir(parents=True)
@@ -48,6 +51,9 @@ def _package(
         (root / "opt/electridrive/_internal/PySide6/Qt/lib" / filename).touch()
     for filename in ("libqoffscreen.so", "libqxcb.so"):
         (root / "opt/electridrive/_internal/PySide6/Qt/plugins/platforms" / filename).touch()
+
+    if extra_library:
+        (root / "opt/electridrive/_internal" / extra_library).touch()
 
     if install_target:
         executable = root / "opt/electridrive/electridrive"
@@ -108,3 +114,29 @@ def test_rejects_fuse3_library_without_fuse2_and_mount_helper(tmp_path: Path):
     assert result.returncode == 1
     assert "missing Debian runtime dependency: libfuse2t64 | libfuse2" in result.stderr
     assert "missing Debian runtime dependency: fuse3 | fuse" in result.stderr
+
+
+def test_rejects_missing_host_glib_dependency(tmp_path: Path):
+    package = _package(
+        tmp_path, "electridrive", install_target=True,
+        depends="libfuse2t64 | libfuse2, fuse3 | fuse, libegl1, libgl1, "
+                "libwayland-cursor0, libwayland-egl1",
+    )
+    result = _verify(package)
+
+    assert result.returncode == 1
+    assert "missing Debian runtime dependency: libglib2.0-0t64 | libglib2.0-0" in result.stderr
+
+
+@pytest.mark.parametrize("library", [
+    "libglib-2.0.so.0", "libgio-2.0.so.0.7200.4", "libmount.so.1",
+])
+def test_rejects_libraries_that_shadow_the_host_desktop(tmp_path: Path, library: str):
+    package = _package(
+        tmp_path, "electridrive", install_target=True, extra_library=library,
+    )
+    result = _verify(package)
+
+    assert result.returncode == 1
+    assert "bundled desktop runtime libraries shadow the host" in result.stderr
+    assert library in result.stderr

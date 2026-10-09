@@ -69,7 +69,7 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libfuse3-3 | fuse3, libegl1, libgl1, libwayland-cursor0, libwayland-egl1
+Depends: libfuse2t64 | libfuse2, fuse3 | fuse, libglib2.0-0t64 | libglib2.0-0, libegl1, libgl1, libwayland-cursor0, libwayland-egl1
 Maintainer: Pierre Stephan / Electri_C_ity Studios
 Description: ElectriDrive - Electric-City Drive for Linux
  Beautiful, safety-first Google Drive client: browse, up/download,
