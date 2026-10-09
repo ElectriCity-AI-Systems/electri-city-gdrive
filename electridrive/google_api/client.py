@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
+import stat
+import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import BinaryIO, Callable, Iterator, Protocol
 
 from electridrive.google_api.oauth import authenticate_interactive
 
@@ -37,6 +41,35 @@ GOOGLE_EXPORT_FORMATS: dict[str, tuple[str, str]] = {
     "application/vnd.google-apps.drawing": ("image/png", ".png"),
 }
 DEFAULT_EXPORT: tuple[str, str] = ("application/pdf", ".pdf")
+
+
+@contextmanager
+def _atomic_download_file(destination: Path) -> Iterator[BinaryIO]:
+    """Keep the destination intact until all bytes and progress callbacks succeed."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(destination.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+
+    temporary: Path | None = None
+    try:
+        # A fixed prefix also works for destination names near NAME_MAX. Hidden
+        # temporary files cannot be picked up by the default sync rules.
+        with tempfile.NamedTemporaryFile(
+            mode="w+b", dir=destination.parent,
+            prefix=".electridrive-download-", suffix=".part", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            temporary.chmod(mode)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def export_format_for(mime_type: str | None) -> tuple[str, str]:
@@ -381,7 +414,7 @@ class GoogleDriveClient:
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         request = self.service.files().get_media(fileId=file_id)
-        with dest_path.open("wb") as handle:
+        with _atomic_download_file(dest_path) as handle:
             downloader = MediaIoBaseDownload(handle, request)
             done = False
             while not done:
@@ -411,7 +444,7 @@ class GoogleDriveClient:
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         request = self.service.files().export_media(fileId=file_id, mimeType=mime_type)
-        with dest_path.open("wb") as handle:
+        with _atomic_download_file(dest_path) as handle:
             downloader = MediaIoBaseDownload(handle, request)
             done = False
             while not done:

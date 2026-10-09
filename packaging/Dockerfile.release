@@ -9,7 +9,8 @@ RUN apt-get update \
         desktop-file-utils \
         file \
         libegl1 \
-        libfuse3-3 \
+        libfuse2 \
+        fuse3 \
         libgl1 \
         libxkbcommon-x11-0 \
         libxcb-cursor0 \

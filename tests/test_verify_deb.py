@@ -10,7 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 VERIFY = ROOT / "scripts" / "verify_deb.py"
 
 
-def _package(tmp_path: Path, exec_name: str, install_target: bool) -> Path:
+def _package(
+    tmp_path: Path, exec_name: str, install_target: bool,
+    depends: str = (
+        "libfuse2t64 | libfuse2, fuse3 | fuse, libegl1, libgl1, "
+        "libwayland-cursor0, libwayland-egl1"
+    ),
+) -> Path:
     root = tmp_path / "root"
     (root / "DEBIAN").mkdir(parents=True)
     (root / "usr/share/applications").mkdir(parents=True)
@@ -21,8 +27,7 @@ def _package(tmp_path: Path, exec_name: str, install_target: bool) -> Path:
         "Package: electridrive\n"
         "Version: 9.9.9\n"
         "Architecture: amd64\n"
-        "Depends: libfuse3-3 | fuse3, libegl1, libgl1, "
-        "libwayland-cursor0, libwayland-egl1\n"
+        f"Depends: {depends}\n"
         "Maintainer: Test <test@example.invalid>\n"
         "Description: package verifier fixture\n",
         encoding="utf-8",
@@ -91,3 +96,15 @@ def test_accepts_executable_desktop_command_and_absolute_symlink(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     assert "Exec=electridrive -> /opt/electridrive/electridrive (executable)" in result.stdout
     assert "TryExec=electridrive -> /opt/electridrive/electridrive (executable)" in result.stdout
+
+
+def test_rejects_fuse3_library_without_fuse2_and_mount_helper(tmp_path: Path):
+    package = _package(
+        tmp_path, "electridrive", install_target=True,
+        depends="libfuse3-3, libegl1, libgl1, libwayland-cursor0, libwayland-egl1",
+    )
+    result = _verify(package)
+
+    assert result.returncode == 1
+    assert "missing Debian runtime dependency: libfuse2t64 | libfuse2" in result.stderr
+    assert "missing Debian runtime dependency: fuse3 | fuse" in result.stderr

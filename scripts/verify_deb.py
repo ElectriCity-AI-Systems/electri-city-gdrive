@@ -34,7 +34,8 @@ REQUIRED_QT_FILES = (
     "libqxcb.so",
 )
 REQUIRED_DEPENDENCY_GROUPS = (
-    ("libfuse3-3", "fuse3"),
+    ("libfuse2t64", "libfuse2"),
+    ("fuse3", "fuse"),
     ("libegl1",),
     ("libgl1",),
     ("libwayland-cursor0",),

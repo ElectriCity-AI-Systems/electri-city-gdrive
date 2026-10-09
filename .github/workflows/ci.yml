@@ -19,10 +19,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Install Qt runtime libraries
+      - name: Install Qt and FUSE runtime libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libfuse2t64 fuse3
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
@@ -53,6 +53,11 @@ jobs:
           electridrive.updater.update_checker, electridrive.ui.app,
           electridrive.ui.update_controller, server.license_server"
 
+      - name: Check the real FUSE binding and mount helper
+        run: >-
+          python -c "import fuse; from electridrive.vfs import fuse_available;
+          assert fuse_available(), 'FUSE 2 library and mount helper are required'"
+
   debian-package:
     runs-on: ubuntu-22.04
 
@@ -76,6 +81,12 @@ jobs:
           profile="$(mktemp -d)"
           mkdir -p "$profile/config" "$profile/state" "$profile/cache" "$profile/runtime"
           chmod 700 "$profile/runtime"
+
+          XDG_CONFIG_HOME="$profile/config" \
+          XDG_STATE_HOME="$profile/state" \
+          XDG_CACHE_HOME="$profile/cache" \
+            /usr/bin/electridrive --doctor | tee "$profile/doctor.out"
+          rg '^FUSE available:   yes$' "$profile/doctor.out"
 
           set +e
           QT_QPA_PLATFORM=offscreen \
