@@ -14,7 +14,7 @@ _SETTINGS_LOCK = threading.RLock()
 APP_ID = "electridrive"
 APP_NAME = "ElectriDrive"
 APP_TAGLINE = "Electric-City Drive for Linux"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 
 DEFAULT_SCOPE = "https://www.googleapis.com/auth/drive.file"
 FULL_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
