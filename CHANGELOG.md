@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Release packages use pinned Python 3.12.15 built on the existing GLIBC 2.35
+  baseline. Package verification rejects Python runtimes below 3.11, and
+  `--doctor` reports the bundled interpreter version.
+- The desktop application ID is set before QApplication construction so platform
+  services receive the identifier during initialization.
 - Downloads and Workspace exports now write to a temporary file in the destination
   directory and replace the destination only after completion. Network errors,
   cancellation, and failed replacement preserve an existing local file and clean up

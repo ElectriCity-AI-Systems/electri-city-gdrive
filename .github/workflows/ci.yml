@@ -93,6 +93,7 @@ jobs:
           XDG_CACHE_HOME="$profile/cache" \
             /usr/bin/electridrive --doctor | tee "$profile/doctor.out"
           grep -Fx 'FUSE available:   yes' "$profile/doctor.out"
+          grep -E '^Python runtime:   3\.12\.' "$profile/doctor.out"
 
           set +e
           QT_QPA_PLATFORM=offscreen \

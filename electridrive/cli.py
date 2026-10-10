@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import platform
 from pathlib import Path
 
 from electridrive.config import SyncPair, get_paths, load_settings, selected_scopes
@@ -19,6 +20,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     paths = get_paths()
     print("ElectriDrive doctor")
+    print(f"Python runtime:   {platform.python_version()}")
     print(f"Config dir:       {paths.config_dir}")
     print(f"State dir:        {paths.state_dir}")
     print(f"Cache dir:        {paths.cache_dir}")

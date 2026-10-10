@@ -269,6 +269,9 @@ bash scripts/build_deb_in_container.sh # -> dist/electridrive_<ver>_amd64.deb + 
 Both scripts auto-bake the client if `ELECTRIDRIVE_CLIENT_ID` is set when you run them.
 Official amd64 packages are built with the pinned release dependencies on Ubuntu 22.04
 (GLIBC 2.35), then checked so newer build hosts cannot silently raise that baseline.
+The container builds pinned Python 3.12.15 from the checksum-verified official
+source archive on that same baseline. `electridrive --doctor` reports the bundled
+Python version; package verification rejects runtimes older than Python 3.11.
 The PyInstaller spec is `packaging/electridrive.spec`. Virtual Drive uses `fusepy`,
 which needs the **FUSE 2** library (`libfuse2t64` on Ubuntu 24.04/26.04 or `libfuse2`
 on Ubuntu 22.04), plus a mount helper from `fuse3` or `fuse`. The Debian package

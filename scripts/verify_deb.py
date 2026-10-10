@@ -27,6 +27,7 @@ SEARCH_PATHS = (
     "sbin",
 )
 GLIBC_REFERENCE = re.compile(r"\(GLIBC_(\d+(?:\.\d+)+)\)")
+PYTHON_LIBRARY = re.compile(r"libpython(\d+\.\d+)\.so(?:\..*)?$")
 REQUIRED_QT_FILES = (
     "libQt6Core.so.6",
     "libQt6Gui.so.6",
@@ -303,6 +304,18 @@ def verify(
         qt_errors, qt_notes = _verify_qt(root)
         errors.extend(qt_errors)
         notes.extend(qt_notes)
+
+        python_versions = sorted({
+            match.group(1)
+            for path in root.rglob("*") if path.is_file()
+            if (match := PYTHON_LIBRARY.fullmatch(path.name))
+        }, key=_version)
+        if not python_versions:
+            errors.append("missing bundled Python runtime")
+        elif any(_version(version) < (3, 11) for version in python_versions):
+            errors.append("unsupported bundled Python runtime: " + ", ".join(python_versions))
+        else:
+            notes.append("supported bundled Python runtime: " + ", ".join(python_versions))
 
         shadowing = sorted(
             str(path.relative_to(root)) for path in root.rglob("*")

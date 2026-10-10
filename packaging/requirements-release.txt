@@ -1,4 +1,4 @@
-# Fully pinned release environment for Python 3.10 on Ubuntu 22.04. Runtime
+# Fully pinned release environment for Python 3.12 on Ubuntu 22.04. Runtime
 # versions match v2.1.1 where they can be recovered from that public artifact.
 # Update deliberately; release builds must not inherit versions from the host.
 altgraph==0.17.5

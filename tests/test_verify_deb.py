@@ -19,6 +19,7 @@ def _package(
         "libwayland-cursor0, libwayland-egl1"
     ),
     extra_library: str | None = None,
+    python_library: str | None = "libpython3.12.so.1.0",
 ) -> Path:
     root = tmp_path / "root"
     (root / "DEBIAN").mkdir(parents=True)
@@ -54,6 +55,8 @@ def _package(
 
     if extra_library:
         (root / "opt/electridrive/_internal" / extra_library).touch()
+    if python_library:
+        (root / "opt/electridrive/_internal" / python_library).touch()
 
     if install_target:
         executable = root / "opt/electridrive/electridrive"
@@ -140,3 +143,20 @@ def test_rejects_libraries_that_shadow_the_host_desktop(tmp_path: Path, library:
     assert result.returncode == 1
     assert "bundled desktop runtime libraries shadow the host" in result.stderr
     assert library in result.stderr
+
+
+def test_rejects_missing_bundled_python_runtime(tmp_path: Path):
+    result = _verify(_package(
+        tmp_path, "electridrive", install_target=True, python_library=None,
+    ))
+    assert result.returncode == 1
+    assert "missing bundled Python runtime" in result.stderr
+
+
+@pytest.mark.parametrize("library", ["libpython3.9.so.1.0", "libpython3.10.so.1.0"])
+def test_rejects_unsupported_bundled_python_runtime(tmp_path: Path, library: str):
+    result = _verify(_package(
+        tmp_path, "electridrive", install_target=True, python_library=library,
+    ))
+    assert result.returncode == 1
+    assert "unsupported bundled Python runtime" in result.stderr
