@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Release packages use pinned Python 3.12.15 built on the existing GLIBC 2.35
+  baseline. Package verification rejects Python runtimes below 3.11, and
+  `--doctor` reports the bundled interpreter version.
+- The desktop application ID is set before QApplication construction so platform
+  services receive the identifier during initialization.
+- Downloads and Workspace exports now write to a temporary file in the destination
+  directory and replace the destination only after completion. Network errors,
+  cancellation, and failed replacement preserve an existing local file and clean up
+  the partial download. Existing file permissions are preserved.
+- Debian packages declare the FUSE 2 library required by fusepy, together with a
+  mount helper. FUSE 3 alone is no longer accepted by the package verifier.
+- Linux bundles use the host GLib/GIO dependency family so newer dconf and GVfs
+  desktop modules do not fail with undefined symbols. Debian packages declare the
+  host GLib runtime; CI probes desktop modules and launches packages on Ubuntu
+  22.04 and 24.04.
+- Download instructions distinguish the current Debian release from the older
+  v2.1.1 AppImage.
+
 ## 2.1.2 — 2026-10-08
 
 ### Fixed

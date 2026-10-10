@@ -1,7 +1,8 @@
 # ⚡ ElectriDrive — Electric-City Drive for Linux
 
 [![Latest release](https://img.shields.io/github/v/release/ElectriCity-AI-Systems/electri-city-gdrive?sort=semver)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)
-[![Download](https://img.shields.io/badge/download-AppImage%20%7C%20.deb-22D3EE)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)
+[![Download](https://img.shields.io/badge/download-.deb-22D3EE)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)
+[![AppImage](https://img.shields.io/badge/AppImage-v2.1.1-22D3EE)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/tag/v2.1.1)
 ![Platform](https://img.shields.io/badge/platform-Linux-555)
 ![No rclone](https://img.shields.io/badge/no-rclone-3B82F6)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -16,7 +17,8 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
 
 > ## ⬇️ Get ElectriDrive
 > **Just want to use it? Download a ready-to-run build — no Python, no setup.**
-> → **[Latest AppImage or .deb](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)**
+> → **[Latest Debian release](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest)**
+> · **[Older AppImage (v2.1.1)](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/tag/v2.1.1)**
 > ```bash
 > chmod +x ElectriDrive-x86_64.AppImage && ./ElectriDrive-x86_64.AppImage
 > # …or:  sudo apt install ./electridrive_2.1.2_amd64.deb
@@ -61,26 +63,30 @@ ElectriDrive brings the experience back — with a modern Electric-Dark designer
 
 ### Option A — download a ready-to-run build (recommended)
 
-Grab the latest **AppImage** or **.deb** from the
-[Releases page](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest):
+Get the current **.deb** and `SHA256SUMS.txt` from the
+[latest Debian release](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/latest).
+The separate **AppImage** is still
+[v2.1.1](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/releases/download/v2.1.1/ElectriDrive-x86_64.AppImage);
+it predates the fixes listed as Unreleased in the changelog.
 
 ```bash
-# AppImage (portable, nothing to install):
-chmod +x ElectriDrive-x86_64.AppImage
-./ElectriDrive-x86_64.AppImage           # on FUSE3-only systems: ./ElectriDrive-x86_64.AppImage --appimage-extract-and-run
-
-# …or the .deb (installs to /opt + app-menu entry):
+# .deb (installs to /opt + app-menu entry):
+sha256sum -c SHA256SUMS.txt
 sudo apt install ./electridrive_2.1.2_amd64.deb
 
-# optional: verify the download
-sha256sum -c SHA256SUMS.txt
+# Older AppImage v2.1.1 (portable):
+chmod +x ElectriDrive-x86_64.AppImage
+./ElectriDrive-x86_64.AppImage
+# If the AppImage runtime cannot mount itself:
+./ElectriDrive-x86_64.AppImage --appimage-extract-and-run
 ```
 
 ### Option B — run from source (developers)
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-venv python3-pip libfuse3-3 fuse3 -y   # fuse only for Virtual Drive
+sudo apt install python3 python3-venv python3-pip libfuse2t64 fuse3 -y
+# Ubuntu 22.04: use libfuse2 instead of libfuse2t64.
 
 git clone https://github.com/ElectriCity-AI-Systems/electri-city-gdrive.git
 cd electri-city-gdrive
@@ -263,8 +269,20 @@ bash scripts/build_deb_in_container.sh # -> dist/electridrive_<ver>_amd64.deb + 
 Both scripts auto-bake the client if `ELECTRIDRIVE_CLIENT_ID` is set when you run them.
 Official amd64 packages are built with the pinned release dependencies on Ubuntu 22.04
 (GLIBC 2.35), then checked so newer build hosts cannot silently raise that baseline.
-The PyInstaller spec is `packaging/electridrive.spec`. FUSE (Virtual Drive) needs
-`libfuse3` on the user's machine (the `.deb` declares it as a dependency).
+The container builds pinned Python 3.12.15 from the checksum-verified official
+source archive on that same baseline. `electridrive --doctor` reports the bundled
+Python version; package verification rejects runtimes older than Python 3.11.
+The PyInstaller spec is `packaging/electridrive.spec`. Virtual Drive uses `fusepy`,
+which needs the **FUSE 2** library (`libfuse2t64` on Ubuntu 24.04/26.04 or `libfuse2`
+on Ubuntu 22.04), plus a mount helper from `fuse3` or `fuse`. The Debian package
+declares both. FUSE 3's library alone does not satisfy `fusepy`.
+New builds support `electridrive --doctor` to check the packaged FUSE binding
+without opening the GUI or signing in; a real mount also requires `/dev/fuse`.
+Linux packages also use the host GLib/GIO runtime (`libglib2.0-0t64` or
+`libglib2.0-0`) and its dependencies, so desktop modules from newer distributions
+can load their matching system libraries. Package verification rejects bundled
+copies of this native library family, and CI probes GIO plus desktop launch on
+Ubuntu 22.04 and 24.04.
 
 ## Automatic license delivery
 

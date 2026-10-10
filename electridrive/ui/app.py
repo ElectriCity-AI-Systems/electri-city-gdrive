@@ -15,12 +15,14 @@ _ICON_PATH = Path(__file__).resolve().parents[2] / "assets" / "electridrive.png"
 
 
 def create_app(argv=None) -> QApplication:
+    # Platform services can register with the desktop portal during construction.
+    # Supply the desktop ID before Qt creates those services.
+    QApplication.setApplicationName("ElectriDrive")
+    QApplication.setApplicationDisplayName("ElectriDrive")
+    QApplication.setDesktopFileName("electridrive")
     app = QApplication.instance()
     if app is None:
         app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("ElectriDrive")
-    app.setApplicationDisplayName("ElectriDrive")
-    app.setDesktopFileName("electridrive")
     app.setWindowIcon(QIcon(str(_ICON_PATH)) if _ICON_PATH.exists()
                       else icons.icon("bolt", "#22D3EE", 64))
     font = QFont()

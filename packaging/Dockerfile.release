@@ -1,26 +1,54 @@
 FROM ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG RELEASE_PYTHON_VERSION=3.12.15
+ARG RELEASE_PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
+        build-essential \
         ca-certificates \
+        curl \
         desktop-file-utils \
         file \
+        libbz2-dev \
         libegl1 \
-        libfuse3-3 \
+        libffi-dev \
+        libfuse2 \
+        fuse3 \
         libgl1 \
+        liblzma-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libssl-dev \
         libxkbcommon-x11-0 \
         libxcb-cursor0 \
-        python3 \
-        python3-pip \
-        python3-venv \
+        uuid-dev \
+        xz-utils \
+        zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Compile a supported Python on the same GLIBC 2.35 baseline as the bundle.
+# Keep the source version and checksum pinned instead of inheriting host Python.
+RUN curl --fail --location --retry 3 \
+        "https://www.python.org/ftp/python/${RELEASE_PYTHON_VERSION}/Python-${RELEASE_PYTHON_VERSION}.tar.xz" \
+        --output /tmp/python.tar.xz \
+    && printf '%s  %s\n' "${RELEASE_PYTHON_SHA256}" /tmp/python.tar.xz | sha256sum --check --status \
+    && mkdir /tmp/python-source \
+    && tar --extract --xz --file /tmp/python.tar.xz --directory /tmp/python-source --strip-components=1 \
+    && cd /tmp/python-source \
+    && LDFLAGS="-Wl,-rpath=/opt/electridrive-python/lib" ./configure \
+        --prefix=/opt/electridrive-python --enable-shared --without-static-libpython \
+    && make -j "$(nproc)" \
+    && make altinstall \
+    && /opt/electridrive-python/bin/python3.12 -c \
+        'import bz2, ctypes, lzma, sqlite3, ssl, zlib; print("Release Python native modules OK")' \
+    && rm -rf /tmp/python-source /tmp/python.tar.xz
 
 COPY packaging/requirements-release.txt /tmp/requirements-release.txt
 
-RUN python3 -m venv /opt/electridrive-release \
+RUN /opt/electridrive-python/bin/python3.12 -m venv /opt/electridrive-release \
     && /opt/electridrive-release/bin/python -m pip install --no-cache-dir pip==26.2.1 \
     && /opt/electridrive-release/bin/python -m pip install \
         --no-cache-dir --requirement /tmp/requirements-release.txt
@@ -39,7 +67,6 @@ RUN apt-get update \
         libnspr4 \
         libnss3 \
         libpulse0 \
-        libpython3.10 \
         libwayland-cursor0 \
         libwayland-egl1 \
         libxcomposite1 \

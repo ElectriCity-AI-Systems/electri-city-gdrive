@@ -312,7 +312,9 @@ class FuseMount:
         if self.is_mounted:
             raise RuntimeError("Already mounted")
         if not fuse_available():
-            raise RuntimeError("FUSE is not available (need libfuse + fusermount).")
+            raise RuntimeError(
+                "FUSE is not available (need fusepy, libfuse2/libfuse2t64 and fuse3/fuse)."
+            )
         from fuse import FUSE
 
         mp = Path(mountpoint).expanduser()
