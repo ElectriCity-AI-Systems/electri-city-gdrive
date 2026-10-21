@@ -20,7 +20,7 @@ def test_check_processed_read_only(processed):
     before = processed.read_bytes()
     assert recovery.check_processed("VALIDTXN01")
     assert not recovery.check_processed("MISSINGTXN")
-    assert not recovery.check_processed("invalid\\nID")
+    assert not recovery.check_processed("invalid\nID")
     assert processed.read_bytes() == before
     assert not processed.with_name("manual_license_resends.log").exists()
 
@@ -95,10 +95,10 @@ def test_env_file_is_parsed_not_executed(tmp_path, monkeypatch):
     marker = tmp_path / "SHOULD_NOT_EXIST"
     env = tmp_path / "license.env"
     env.write_text(
-        f'SMTP_HOST=smtp.example.com\\n'
-        f'SMTP_USER="$(touch {marker})"\\n'
-        'PAYPAL_CURRENCY=EUR\\n'
-        'UNKNOWN_SECRET=ignored\\n',
+        f'SMTP_HOST=smtp.example.com\n'
+        f'SMTP_USER="$(touch {marker})"\n'
+        'PAYPAL_CURRENCY=EUR\n'
+        'UNKNOWN_SECRET=ignored\n',
         encoding="utf-8",
     )
     monkeypatch.delenv("UNKNOWN_SECRET", raising=False)
