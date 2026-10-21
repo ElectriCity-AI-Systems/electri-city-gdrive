@@ -174,6 +174,9 @@ def create_app():
     from flask import Flask, request
 
     app = Flask(__name__)
+    # Gunicorn does not automatically enable our module logger at INFO level.
+    # Flask routes its application logger to the Gunicorn error stream.
+    app.logger.setLevel(logging.INFO)
     receiver = os.environ.get("PAYPAL_RECEIVER_EMAIL", "").strip()
     min_amount = Decimal(os.environ.get("MIN_AMOUNT", "0") or "0")
     expected_currency = os.environ.get("PAYPAL_CURRENCY", "EUR").strip().upper()
@@ -233,7 +236,8 @@ def create_app():
             )
             return ("", 500)
 
-        LOGGER.info("Issued and delivered license for txn_id=%s", txn)
+        # SMTP acceptance does not prove delivery to the recipient inbox.
+        app.logger.info("License email accepted by SMTP: txn_id=%s; inbox delivery unconfirmed", txn)
         return ("", 200)
 
     return app
