@@ -91,3 +91,55 @@ confirm the email arrives and the key activates in the app. Then switch to `live
 - Payer addresses and generated license keys are not written to application logs.
 - Modern alternative: PayPal REST **Webhooks** (signature-verified). IPN is used here because
   it works directly with hosted *donate* buttons with the least setup.
+
+## 6. Diagnosing missing license emails (operator runbook)
+
+A PayPal IPN HTTP 200 means **only** that the endpoint answered. A transaction
+listed in `PROCESSED_FILE` means the application generated a valid signed key,
+and the SMTP server accepted the message; it **does not prove inbox delivery**.
+Check junk/spam, provider bounce/rejection reports, SPF/DKIM/DMARC alignment,
+the recipient address in the original PayPal transaction, and any SMTP provider
+logs before concluding that a message was delivered.
+
+The app now logs `License email accepted by SMTP` to the Gunicorn/systemd
+journal for **newly processed** transactions. No private key, full payer email,
+or signed license is written to that log. Do not paste raw journal output
+containing private data into public tickets.
+
+### Controlled owner-only recovery
+
+Use the following commands **on the licensed VPS** after deploying this update.
+Never enter a signing key, SMTP password, or full license into chat or CI logs.
+
+```bash
+# Normal terminal command — NOT a Python heredoc.
+cd /opt/electridrive-license/app
+
+# Read-only: checks the existing processed ledger.
+sudo /opt/electridrive-license/.venv/bin/python -m server.license_recovery
+
+# Optional: resend for a processed PayPal txn after manual verification.
+sudo /opt/electridrive-license/.venv/bin/python -m server.license_recovery --resend
+```
+
+The operator enters the transaction ID interactively, and must cross-check
+that PayPal lists this payment as completed, not refunded/reversed, and
+**explicitly associated with ElectriDrive Pro**. The payer's full name and
+email must match PayPal. The operator types `RESEND` to authorize sending.
+The script never prints the generated license, never modifies `processed.txt`,
+and records only transaction ID, timestamp, and SMTP acceptance in
+`manual_license_resends.log` beside the processed file (mode 0600).
+
+**Security:** this CLI has access to the production signing key and must
+remain restricted to the server owner. Do not add a public resend endpoint.
+Do not regenerate the private signing key.
+
+### Critical follow-up: donation/product isolation
+
+The current IPN grant criteria do not strictly bind a PayPal transaction to
+the ElectriDrive Pro donate button. If the same receiver is shared with other
+donation buttons, a completed EUR donation might incorrectly receive a license.
+Before enforcing a product identifier, inspect the **actual PayPal IPN fields**
+for the ElectriDrive button and confirm a reliable button or product marker,
+then add an enforced, tested product check and deploy with rollback. Do not
+turn on an unverified filter that can silently reject real customer donations.
