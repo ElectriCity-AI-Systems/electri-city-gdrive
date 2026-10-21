@@ -27,6 +27,7 @@ import sys
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
+from email.utils import make_msgid
 from pathlib import Path
 
 # Make the electridrive package importable when run from the repo.
@@ -131,6 +132,7 @@ def build_message(to_email: str, name: str, key: str) -> EmailMessage:
     msg["Subject"] = os.environ.get("MAIL_SUBJECT", "Your ElectriDrive Pro license key ⚡")
     msg["From"] = os.environ.get("MAIL_FROM", os.environ.get("SMTP_USER", ""))
     msg["To"] = to_email
+    msg["Message-ID"] = make_msgid()
     msg.set_content(
         f"Hi {name},\n\n"
         "Thank you for supporting ElectriDrive! Here is your Pro license key:\n\n"
@@ -225,8 +227,11 @@ def create_app():
                     return ("", 500)
                 name, email = payer_identity(form)
                 key = issue_key(name, email)
-                send_email(build_message(email, name, key))
+                msg = build_message(email, name, key)
+                send_email(msg)
                 mark_processed(txn)
+                msg_ref = msg.get("Message-ID", "-") if hasattr(msg, "get") else "-"
+                app.logger.info("SMTP accepted license mail: txn_id=%s message_id=%s; recipient inbox unconfirmed", txn, msg_ref)
         except Exception as exc:
             # Do not log exception text: SMTP errors can include payer addresses.
             LOGGER.error(
@@ -236,8 +241,6 @@ def create_app():
             )
             return ("", 500)
 
-        # SMTP acceptance does not prove delivery to the recipient inbox.
-        app.logger.info("License email accepted by SMTP: txn_id=%s; inbox delivery unconfirmed", txn)
         return ("", 200)
 
     return app
