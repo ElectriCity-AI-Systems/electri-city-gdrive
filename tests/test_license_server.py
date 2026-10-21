@@ -194,3 +194,11 @@ def test_ipn_missing_or_unsafe_transaction_id_returns_200(tmp_path, monkeypatch)
     unsafe = _completed_ipn("line1\nline2")
     assert client.post("/paypal/ipn", data=missing).status_code == 200
     assert client.post("/paypal/ipn", data=unsafe).status_code == 200
+
+
+def test_license_message_has_traceable_id_without_private_data_in_headers():
+    msg = ls.build_message("payer@example.com", "Test User", "secret-license-key")
+    assert msg["Message-ID"].startswith("<")
+    assert msg["Message-ID"].endswith(">")
+    assert "secret-license-key" not in msg["Message-ID"]
+    assert "payer@example.com" not in msg["Message-ID"]
