@@ -239,7 +239,8 @@ def create_app():
                     product_field, product_value
                 )
                 if not ok:
-                    LOGGER.info("Verified IPN not granted: %s", reason)
+                    # This safe reason code contains no payer details or amounts.
+                    app.logger.info("Verified IPN declined: txn_id=%s reason=%s", txn, reason)
                     return ("", 200)
                 if not receiver:
                     # A missing merchant identity is configuration failure, not a
