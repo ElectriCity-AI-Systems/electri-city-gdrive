@@ -24,7 +24,7 @@ PAYPAL_CURRENCY=EUR
 # REQUIRED before updating the running service: match actual VERIFIED ElectriDrive IPN.
 # See section "Product binding" below for validation.
 PAYPAL_PRODUCT_FIELD=item_name
-PAYPAL_PRODUCT_VALUE=For Pro Subscription - ElectriDrive
+PAYPAL_PRODUCT_VALUE="For Pro Subscription - ElectriDrive"
 SIGNING_KEY_PATH=/opt/electridrive-license/secrets/license_signing_key.pem
 MIN_AMOUNT=0
 SMTP_HOST=smtp.ionos.de
