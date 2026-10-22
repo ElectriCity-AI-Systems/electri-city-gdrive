@@ -26,7 +26,8 @@ PAYPAL_CURRENCY=EUR
 PAYPAL_PRODUCT_FIELD=item_name
 PAYPAL_PRODUCT_VALUE="For Pro Subscription - ElectriDrive"
 SIGNING_KEY_PATH=/opt/electridrive-license/secrets/license_signing_key.pem
-MIN_AMOUNT=0  # Pay What You Want: any strictly positive EUR payment grants Pro
+# Pay What You Want: strictly positive EUR payment after all grant checks
+MIN_AMOUNT=0
 SMTP_HOST=smtp.ionos.de
 SMTP_PORT=587
 SMTP_USER=<SMTP login>
