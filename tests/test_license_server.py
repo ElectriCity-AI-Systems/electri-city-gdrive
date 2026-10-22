@@ -210,7 +210,7 @@ def test_license_message_has_traceable_id_without_private_data_in_headers():
 def test_ipn_general_community_donation_cannot_grant_pro(tmp_path, monkeypatch):
     client = _client(monkeypatch, tmp_path)
     unrelated = _completed_ipn("UNRELATED01")
-    unrelated["item_name"] = "Electri_C_ity - Studios Community Support"
+    unrelated["item_name"] = "Only for Community Support"
     monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
         AssertionError("unrelated donation must never be licensed")))
     assert client.post("/paypal/ipn", data=unrelated).status_code == 200
@@ -256,7 +256,7 @@ def test_should_grant_checks_product_field_when_configured():
         valid, "merchant@example.com", 0, "EUR", "item_name", "For Pro Subscription - ElectriDrive"
     )[0]
     ok, reason = ls.should_grant(
-        valid, "merchant@example.com", 0, "EUR", "item_name", "Electri_C_ity - Studios Community Support"
+        valid, "merchant@example.com", 0, "EUR", "item_name", "Only for Community Support"
     )
     assert not ok and reason == "product mismatch"
 
@@ -303,7 +303,7 @@ def test_real_world_electridrive_product_marker_from_redacted_ipn():
         "For Pro Subscription - ElectriDrive",
     ) == (True, "ok")
     for changed_field, changed_value in [
-        ("item_name", "Electri_C_ity - Studios Community Support"),
+        ("item_name", "Only for Community Support"),
         ("item_name", ""),
         ("mc_currency", "USD"),
         ("payment_status", "Pending"),
@@ -340,3 +340,28 @@ def test_pay_what_you_want_accepts_any_positive_eur_amount():
             "item_name", "For Pro Subscription - ElectriDrive",
         )
         assert not ok, amount
+
+
+
+def test_observed_community_ipn_never_issues_pro_even_if_currency_looks_eligible(
+        tmp_path, monkeypatch):
+    """Anonymised October community IPN: PayPal sends it to WordPress, not Pro."""
+    client = _client(monkeypatch, tmp_path)
+    community = _completed_ipn("SYNTHETICCOMMUNITY01")
+    community.update({
+        "item_name": "Only for Community Support",
+        "item_number": "Music Production",
+        "custom": "nonempty-community-choice",
+        "mc_currency": "USD",
+        "mc_gross": "3.00",
+        "payment_status": "Completed",
+    })
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("Community Support must not mint ElectriDrive Pro")))
+    assert client.post("/paypal/ipn", data=community).status_code == 200
+    assert not ls.already_processed("SYNTHETICCOMMUNITY01")
+    # Even if the currency were EUR, exact item_name must still prevent
+    # accidental licensing: product check is not just a currency check.
+    community["mc_currency"] = "EUR"
+    assert client.post("/paypal/ipn", data=community).status_code == 200
+    assert not ls.already_processed("SYNTHETICCOMMUNITY01")
