@@ -72,6 +72,7 @@ def _completed_ipn(txn_id="TESTTXN001"):
         "mc_gross": "5.00",
         "mc_currency": "EUR",
         "txn_id": txn_id,
+        "item_name": "For Pro Subscription - ElectriDrive",
     }
 
 
@@ -79,6 +80,8 @@ def _client(monkeypatch, tmp_path, receiver="merchant@example.com"):
     monkeypatch.setenv("PROCESSED_FILE", str(tmp_path / "processed.txt"))
     monkeypatch.setenv("MIN_AMOUNT", "0")
     monkeypatch.setenv("PAYPAL_CURRENCY", "EUR")
+    monkeypatch.setenv("PAYPAL_PRODUCT_FIELD", "item_name")
+    monkeypatch.setenv("PAYPAL_PRODUCT_VALUE", "For Pro Subscription - ElectriDrive")
     if receiver is None:
         monkeypatch.delenv("PAYPAL_RECEIVER_EMAIL", raising=False)
     else:
@@ -194,3 +197,171 @@ def test_ipn_missing_or_unsafe_transaction_id_returns_200(tmp_path, monkeypatch)
     unsafe = _completed_ipn("line1\nline2")
     assert client.post("/paypal/ipn", data=missing).status_code == 200
     assert client.post("/paypal/ipn", data=unsafe).status_code == 200
+
+
+def test_license_message_has_traceable_id_without_private_data_in_headers():
+    msg = ls.build_message("payer@example.com", "Test User", "secret-license-key")
+    assert msg["Message-ID"].startswith("<")
+    assert msg["Message-ID"].endswith(">")
+    assert "secret-license-key" not in msg["Message-ID"]
+    assert "payer@example.com" not in msg["Message-ID"]
+
+
+def test_ipn_general_community_donation_cannot_grant_pro(tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    unrelated = _completed_ipn("UNRELATED01")
+    unrelated["item_name"] = "Only for Community Support"
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("unrelated donation must never be licensed")))
+    assert client.post("/paypal/ipn", data=unrelated).status_code == 200
+    assert not ls.already_processed("UNRELATED01")
+
+
+def test_ipn_missing_product_metadata_cannot_grant_pro(tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    missing_marker = _completed_ipn("NOMARKER01")
+    missing_marker.pop("item_name")
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("unidentifiable payment must not be licensed")))
+    assert client.post("/paypal/ipn", data=missing_marker).status_code == 200
+    assert not ls.already_processed("NOMARKER01")
+
+
+def test_ipn_without_configured_product_binding_retries_and_never_issues(
+        tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.delenv("PAYPAL_PRODUCT_FIELD", raising=False)
+    # create_app reads configuration at startup
+    blocked_client = ls.create_app().test_client()
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("missing configuration must not issue license")))
+    assert blocked_client.post("/paypal/ipn", data=_completed_ipn()).status_code == 503
+    assert not ls.already_processed("TESTTXN001")
+
+
+def test_ipn_unsupported_product_field_configuration_retries(
+        tmp_path, monkeypatch):
+    _client(monkeypatch, tmp_path)
+    monkeypatch.setenv("PAYPAL_PRODUCT_FIELD", "hosted_button_id")
+    blocked_client = ls.create_app().test_client()
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("cannot trust unverified field")))
+    assert blocked_client.post("/paypal/ipn", data=_completed_ipn()).status_code == 503
+    assert not ls.already_processed("TESTTXN001")
+
+
+def test_should_grant_checks_product_field_when_configured():
+    valid = _completed_ipn()
+    assert ls.should_grant(
+        valid, "merchant@example.com", 0, "EUR", "item_name", "For Pro Subscription - ElectriDrive"
+    )[0]
+    ok, reason = ls.should_grant(
+        valid, "merchant@example.com", 0, "EUR", "item_name", "Only for Community Support"
+    )
+    assert not ok and reason == "product mismatch"
+
+
+def test_should_grant_never_issues_for_zero_or_negative_amount():
+    for value in ("0", "0.00", "-0.01", "-3.00"):
+        payment = _completed_ipn()
+        payment["mc_gross"] = value
+        ok, _ = ls.should_grant(
+            payment, "merchant@example.com", 0, "EUR", "item_name", "For Pro Subscription - ElectriDrive"
+        )
+        assert not ok, f"Zero/negative payment incorrectly licensed: {value}"
+
+
+def test_ipn_zero_amount_does_not_issue_even_with_matching_product(
+        tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    zero = _completed_ipn("ZERO01")
+    zero["mc_gross"] = "0.00"
+    monkeypatch.setattr(ls, "issue_key", lambda *_: (_ for _ in ()).throw(
+        AssertionError("zero amount must not issue license")))
+    assert client.post("/paypal/ipn", data=zero).status_code == 200
+    assert not ls.already_processed("ZERO01")
+
+
+def test_real_world_electridrive_product_marker_from_redacted_ipn():
+    """Synthetic IPN shaped like the observed October Pro donation (no PII)."""
+    form = _completed_ipn("SYNTHETIC01")
+    form.update({
+        "item_name": "For Pro Subscription - ElectriDrive",
+        "item_number": "",
+        "custom": "",
+        "txn_type": "web_accept",
+        "mc_gross": "3.00",
+        "mc_currency": "EUR",
+        "quantity": "1",
+    })
+    assert ls.should_grant(
+        form,
+        "merchant@example.com",
+        0,
+        "EUR",
+        "item_name",
+        "For Pro Subscription - ElectriDrive",
+    ) == (True, "ok")
+    for changed_field, changed_value in [
+        ("item_name", "Only for Community Support"),
+        ("item_name", ""),
+        ("mc_currency", "USD"),
+        ("payment_status", "Pending"),
+        ("mc_gross", "0.00"),
+    ]:
+        variant = dict(form)
+        variant[changed_field] = changed_value
+        result, _reason = ls.should_grant(
+            variant,
+            "merchant@example.com",
+            0,
+            "EUR",
+            "item_name",
+            "For Pro Subscription - ElectriDrive",
+        )
+        assert not result, (changed_field, changed_value)
+
+
+def test_pay_what_you_want_accepts_any_positive_eur_amount():
+    """Owner pricing decision: every positive EUR donation, no 3-euro minimum."""
+    for amount in ("0.01", "0.10", "1.00", "2.99", "3.00", "25.00"):
+        payment = _completed_ipn("SYNTHETIC_PWYW01")
+        payment["mc_gross"] = amount
+        ok, reason = ls.should_grant(
+            payment, "merchant@example.com", 0, "EUR",
+            "item_name", "For Pro Subscription - ElectriDrive",
+        )
+        assert (ok, reason) == (True, "ok"), amount
+    for amount in ("0", "0.00", "-0.01"):
+        payment = _completed_ipn("SYNTHETIC_PWYW02")
+        payment["mc_gross"] = amount
+        ok, _ = ls.should_grant(
+            payment, "merchant@example.com", 0, "EUR",
+            "item_name", "For Pro Subscription - ElectriDrive",
+        )
+        assert not ok, amount
+
+
+
+def test_observed_community_ipn_never_issues_pro_even_if_currency_looks_eligible(
+        tmp_path, monkeypatch):
+    """Anonymised October community IPN: PayPal sends it to WordPress, not Pro."""
+    client = _client(monkeypatch, tmp_path)
+    community = _completed_ipn("SYNTHETICCOMMUNITY01")
+    community.update({
+        "item_name": "Only for Community Support",
+        "item_number": "Music Production",
+        "custom": "nonempty-community-choice",
+        "mc_currency": "USD",
+        "mc_gross": "3.00",
+        "payment_status": "Completed",
+    })
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("Community Support must not mint ElectriDrive Pro")))
+    assert client.post("/paypal/ipn", data=community).status_code == 200
+    assert not ls.already_processed("SYNTHETICCOMMUNITY01")
+    # Even if the currency were EUR, exact item_name must still prevent
+    # accidental licensing: product check is not just a currency check.
+    community["mc_currency"] = "EUR"
+    assert client.post("/paypal/ipn", data=community).status_code == 200
+    assert not ls.already_processed("SYNTHETICCOMMUNITY01")
