@@ -106,3 +106,9 @@ def test_env_file_is_parsed_not_executed(tmp_path, monkeypatch):
     assert not marker.exists()
     assert "touch" in __import__("os").environ["SMTP_USER"]
     assert "UNKNOWN_SECRET" not in __import__("os").environ
+
+
+def test_recovery_command_refuses_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(recovery.os, "geteuid", lambda: 0)
+    assert recovery.main(["--env-file", str(tmp_path / "missing.env")]) == 2
+    assert "never as root" in capsys.readouterr().err
