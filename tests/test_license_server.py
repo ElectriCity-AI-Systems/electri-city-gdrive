@@ -72,6 +72,7 @@ def _completed_ipn(txn_id="TESTTXN001"):
         "mc_gross": "5.00",
         "mc_currency": "EUR",
         "txn_id": txn_id,
+        "item_number": "electridrive-pro",
     }
 
 
@@ -79,6 +80,8 @@ def _client(monkeypatch, tmp_path, receiver="merchant@example.com"):
     monkeypatch.setenv("PROCESSED_FILE", str(tmp_path / "processed.txt"))
     monkeypatch.setenv("MIN_AMOUNT", "0")
     monkeypatch.setenv("PAYPAL_CURRENCY", "EUR")
+    monkeypatch.setenv("PAYPAL_PRODUCT_FIELD", "item_number")
+    monkeypatch.setenv("PAYPAL_PRODUCT_VALUE", "electridrive-pro")
     if receiver is None:
         monkeypatch.delenv("PAYPAL_RECEIVER_EMAIL", raising=False)
     else:
@@ -202,3 +205,57 @@ def test_license_message_has_traceable_id_without_private_data_in_headers():
     assert msg["Message-ID"].endswith(">")
     assert "secret-license-key" not in msg["Message-ID"]
     assert "payer@example.com" not in msg["Message-ID"]
+
+
+def test_ipn_general_community_donation_cannot_grant_pro(tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    unrelated = _completed_ipn("UNRELATED01")
+    unrelated["item_number"] = "studios-community-support"
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("unrelated donation must never be licensed")))
+    assert client.post("/paypal/ipn", data=unrelated).status_code == 200
+    assert not ls.already_processed("UNRELATED01")
+
+
+def test_ipn_missing_product_metadata_cannot_grant_pro(tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    missing_marker = _completed_ipn("NOMARKER01")
+    missing_marker.pop("item_number")
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("unidentifiable payment must not be licensed")))
+    assert client.post("/paypal/ipn", data=missing_marker).status_code == 200
+    assert not ls.already_processed("NOMARKER01")
+
+
+def test_ipn_without_configured_product_binding_retries_and_never_issues(
+        tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.delenv("PAYPAL_PRODUCT_FIELD", raising=False)
+    # create_app reads configuration at startup
+    blocked_client = ls.create_app().test_client()
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("missing configuration must not issue license")))
+    assert blocked_client.post("/paypal/ipn", data=_completed_ipn()).status_code == 503
+    assert not ls.already_processed("TESTTXN001")
+
+
+def test_ipn_unsupported_product_field_configuration_retries(
+        tmp_path, monkeypatch):
+    _client(monkeypatch, tmp_path)
+    monkeypatch.setenv("PAYPAL_PRODUCT_FIELD", "hosted_button_id")
+    blocked_client = ls.create_app().test_client()
+    monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
+        AssertionError("cannot trust unverified field")))
+    assert blocked_client.post("/paypal/ipn", data=_completed_ipn()).status_code == 503
+    assert not ls.already_processed("TESTTXN001")
+
+
+def test_should_grant_checks_product_field_when_configured():
+    valid = _completed_ipn()
+    assert ls.should_grant(
+        valid, "merchant@example.com", 0, "EUR", "item_number", "electridrive-pro"
+    )[0]
+    ok, reason = ls.should_grant(
+        valid, "merchant@example.com", 0, "EUR", "item_number", "other-product"
+    )
+    assert not ok and reason == "product mismatch"
