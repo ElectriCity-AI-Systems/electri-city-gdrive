@@ -26,7 +26,7 @@ PAYPAL_CURRENCY=EUR
 PAYPAL_PRODUCT_FIELD=item_name
 PAYPAL_PRODUCT_VALUE="For Pro Subscription - ElectriDrive"
 SIGNING_KEY_PATH=/opt/electridrive-license/secrets/license_signing_key.pem
-MIN_AMOUNT=0
+MIN_AMOUNT=0  # Pay What You Want: any strictly positive EUR payment grants Pro
 SMTP_HOST=smtp.ionos.de
 SMTP_PORT=587
 SMTP_USER=<SMTP login>
@@ -41,6 +41,16 @@ credentials, customer data, transaction state, and the signing key outside the r
 For v2.1.0 and later, the server must issue new licenses with the private key matching the
 current `PUBLIC_KEY_B64`. Keep that key outside the repository. The application retains the
 previous public key only as a verification fallback for licenses issued before the rotation.
+
+**Owner-confirmed pricing rule (22 Oct 2026): Pay What You Want.**
+ElectriDrive Pro requires **no fixed EUR 3 minimum**. Keep `MIN_AMOUNT=0`;
+the server independently rejects amounts `<= 0` and accepts a positive
+amount only after all other checks (PayPal verification, completed status,
+merchant, EUR currency, exact ElectriDrive Pro item name, payer email,
+valid transaction ID and deduplication) succeed. **Never** infer a
+recurring subscription from the PayPal item name: the observed IPN was
+`web_accept` with `mc_gross=3.00`. Renaming the PayPal item requires
+updating and retesting the exact-match configuration before rollout.
 
 The production service uses two Gunicorn workers and binds only to
 `127.0.0.1:8012`. Its durable transaction state is
