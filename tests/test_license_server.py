@@ -320,3 +320,23 @@ def test_real_world_electridrive_product_marker_from_redacted_ipn():
             "For Pro Subscription - ElectriDrive",
         )
         assert not result, (changed_field, changed_value)
+
+
+def test_pay_what_you_want_accepts_any_positive_eur_amount():
+    """Owner pricing decision: every positive EUR donation, no 3-euro minimum."""
+    for amount in ("0.01", "0.10", "1.00", "2.99", "3.00", "25.00"):
+        payment = _completed_ipn("SYNTHETIC_PWYW01")
+        payment["mc_gross"] = amount
+        ok, reason = ls.should_grant(
+            payment, "merchant@example.com", 0, "EUR",
+            "item_name", "For Pro Subscription - ElectriDrive",
+        )
+        assert (ok, reason) == (True, "ok"), amount
+    for amount in ("0", "0.00", "-0.01"):
+        payment = _completed_ipn("SYNTHETIC_PWYW02")
+        payment["mc_gross"] = amount
+        ok, _ = ls.should_grant(
+            payment, "merchant@example.com", 0, "EUR",
+            "item_name", "For Pro Subscription - ElectriDrive",
+        )
+        assert not ok, amount
