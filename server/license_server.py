@@ -42,6 +42,9 @@ _IPN_URL = {
 }
 
 _TXN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# These are PayPal IPN payment metadata fields, not the hosted_button_id.
+# Only select a field observed in a PayPal-verified ElectriDrive Pro IPN.
+_PRODUCT_FIELDS = frozenset(("item_number", "item_name", "custom"))
 
 
 def ipn_verify_url() -> str:
@@ -58,6 +61,8 @@ def should_grant(
     receiver_email: str,
     min_amount: float | Decimal = 0.0,
     expected_currency: str | None = None,
+    product_field: str | None = None,
+    product_value: str | None = None,
 ) -> tuple[bool, str]:
     """Decide whether a (already PayPal-verified) IPN should yield a license."""
     if form.get("payment_status") != "Completed":
@@ -76,6 +81,13 @@ def should_grant(
         return False, "currency mismatch"
     if not form.get("payer_email"):
         return False, "no payer_email"
+    # Only the IPN listener passes enforced product parameters. The direct
+    # helper API remains useful for testing basic payment eligibility.
+    if product_field is not None or product_value is not None:
+        if product_field not in _PRODUCT_FIELDS or not product_value:
+            return False, "invalid product configuration"
+        if str(form.get(product_field, "")) != product_value:
+            return False, "product mismatch"
     return True, "ok"
 
 
@@ -182,6 +194,8 @@ def create_app():
     receiver = os.environ.get("PAYPAL_RECEIVER_EMAIL", "").strip()
     min_amount = Decimal(os.environ.get("MIN_AMOUNT", "0") or "0")
     expected_currency = os.environ.get("PAYPAL_CURRENCY", "EUR").strip().upper()
+    product_field = os.environ.get("PAYPAL_PRODUCT_FIELD", "").strip()
+    product_value = os.environ.get("PAYPAL_PRODUCT_VALUE", "").strip()
 
     @app.get("/health")
     def health():
@@ -204,6 +218,12 @@ def create_app():
             return ("", 200)
 
         txn = form.get("txn_id", "").strip()
+        # Fail closed without a verified product binding: EUR payments for
+        # unrelated Studios donations must never mint ElectriDrive licenses.
+        # 503 permits PayPal to retry once configuration has been corrected.
+        if product_field not in _PRODUCT_FIELDS or not product_value:
+            app.logger.error("License IPN blocked: missing or invalid product binding")
+            return ("", 503)
         if not valid_txn_id(txn):
             LOGGER.info("Verified IPN not granted: invalid txn_id")
             return ("", 200)
@@ -215,7 +235,8 @@ def create_app():
                 if already_processed(txn):
                     return ("", 200)
                 ok, reason = should_grant(
-                    form, receiver, min_amount, expected_currency or None
+                    form, receiver, min_amount, expected_currency or None,
+                    product_field, product_value
                 )
                 if not ok:
                     LOGGER.info("Verified IPN not granted: %s", reason)
