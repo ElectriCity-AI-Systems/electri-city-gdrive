@@ -21,6 +21,10 @@ Install the repository-managed unit from `systemd/electridrive-license.service`.
 PAYPAL_ENV=live
 PAYPAL_RECEIVER_EMAIL=<PayPal merchant address>
 PAYPAL_CURRENCY=EUR
+# REQUIRED before updating the running service: match actual VERIFIED ElectriDrive IPN.
+# See section "Product binding" below for validation.
+PAYPAL_PRODUCT_FIELD=<item_number|item_name|custom>
+PAYPAL_PRODUCT_VALUE=<exact verified ElectriDrive Pro value>
 SIGNING_KEY_PATH=/opt/electridrive-license/secrets/license_signing_key.pem
 MIN_AMOUNT=0
 SMTP_HOST=smtp.ionos.de
@@ -42,7 +46,51 @@ The production service uses two Gunicorn workers and binds only to
 `127.0.0.1:8012`. Its durable transaction state is
 `/var/lib/electridrive-license/processed.txt`.
 
-## 3. Install and run
+## 3. Product binding (must be validated before production deploy)
+
+An IPN verified by PayPal proves that PayPal sent payment data. It does **not**
+prove the payment was for **ElectriDrive Pro** merely because the merchant,
+currency, and payment state match: this merchant also receives unrelated
+Studios donations. The license server now **fails closed** until
+`PAYPAL_PRODUCT_FIELD` and `PAYPAL_PRODUCT_VALUE` are set.
+
+Choose **one** field (`item_number`, `custom` or `item_name`) from the
+**actual raw PayPal IPN notification associated with a confirmed ElectriDrive
+Pro payment**. It must be stable for every valid Pro payment and must differ
+from normal Studios donations. Prefer `item_number` or a dedicated purpose
+code over display text; the hosted button ID in the payment page URL is **not
+assumed** to exist in the IPN body. Never configure `txn_id` or payer data as
+a product marker. PayPal's standard integration supports pass-through
+`item_number` and `custom`, but a hosted donation button might not supply
+them for every payment method.
+
+Validate the real IPN metadata in PayPal's IPN history/details without
+copying payer names, email addresses, transaction IDs or raw IPN bodies into
+tickets or chats. Compare against a known community donation. If no reliable
+marker exists, **do not deploy this change yet**: first arrange separate
+payment routing or a stronger server-side purchase verification approach.
+
+Example only; NOT a verified value for the existing PayPal hosted button:
+
+```ini
+PAYPAL_PRODUCT_FIELD=item_number
+PAYPAL_PRODUCT_VALUE=electridrive-pro
+```
+
+With a marker configured, missing/different product metadata gets HTTP 200
+(verified unrelated payment, no license). An absent/invalid marker configuration
+returns HTTP 503 for PayPal-verified IPNs, allowing PayPal to retry once
+configuration is fixed. The regular health endpoint remains available.
+If you need to correct a real customer payment which was skipped, use the
+approved manual reconciliation process after independently verifying the
+payment; never replay an unverified forged IPN.
+
+**Threat model:** A plain pass-through product marker reduces accidental
+cross-product grants; it is not a cryptographic order-to-product binding.
+For stronger protection, issue server-side purchase references and reconcile
+payment identity through the PayPal API before granting licenses.
+
+## 4. Install and run
 
 ```bash
 sudo systemd-analyze verify systemd/electridrive-license.service
@@ -55,7 +103,7 @@ curl -fsS http://127.0.0.1:8012/health
 
 The expected health response is `{"ok":true}`. Never expose port 8012 publicly.
 
-## 4. Point PayPal at it
+## 5. Point PayPal at it
 
 - PayPal → Account Settings → **Notifications → Instant Payment Notifications** → enable,
   set the IPN URL to `https://your-host/paypal/ipn`.
@@ -74,7 +122,7 @@ location = /paypal/ipn {
 }
 ```
 
-## 5. Test
+## 6. Test
 
 Use **sandbox** first (`PAYPAL_ENV=sandbox`, an SMTP test inbox), make a sandbox donation,
 confirm the email arrives and the key activates in the app. Then switch to `live`.
@@ -92,7 +140,7 @@ confirm the email arrives and the key activates in the app. Then switch to `live
 - Modern alternative: PayPal REST **Webhooks** (signature-verified). IPN is used here because
   it works directly with hosted *donate* buttons with the least setup.
 
-## 6. Diagnosing missing license emails (operator runbook)
+## 7. Diagnosing missing license emails (operator runbook)
 
 A PayPal IPN HTTP 200 means **only** that the endpoint answered. A transaction
 listed in `PROCESSED_FILE` means the application generated a valid signed key,
@@ -101,7 +149,7 @@ Check junk/spam, provider bounce/rejection reports, SPF/DKIM/DMARC alignment,
 the recipient address in the original PayPal transaction, and any SMTP provider
 logs before concluding that a message was delivered.
 
-The app now logs `License email accepted by SMTP` to the Gunicorn/systemd
+The app now logs `SMTP accepted license mail` with a generated Message-ID to the Gunicorn/systemd
 journal for **newly processed** transactions. No private key, full payer email,
 or signed license is written to that log. Do not paste raw journal output
 containing private data into public tickets.
@@ -134,12 +182,12 @@ and records only transaction ID, timestamp, and SMTP acceptance in
 remain restricted to the server owner. Do not add a public resend endpoint.
 Do not regenerate the private signing key.
 
-### Critical follow-up: donation/product isolation
+### Deployment gate
 
-The current IPN grant criteria do not strictly bind a PayPal transaction to
-the ElectriDrive Pro donate button. If the same receiver is shared with other
-donation buttons, a completed EUR donation might incorrectly receive a license.
-Before enforcing a product identifier, inspect the **actual PayPal IPN fields**
-for the ElectriDrive button and confirm a reliable button or product marker,
-then add an enforced, tested product check and deploy with rollback. Do not
-turn on an unverified filter that can silently reject real customer donations.
+Do not deploy until the exact marker is confirmed from a genuine ElectriDrive
+Pro PayPal notification and the community-button value is also checked.
+Before restarting, preserve a backup of the exact current application version,
+service environment, private key path and processed ledger. Do not copy the
+private key into git, CI artifacts or the deployment bundle. Use the CI-proven
+commit, verify `/health`, and retain an immediate rollback to the previously
+running release. Never use a forged paid IPN as a production test.
