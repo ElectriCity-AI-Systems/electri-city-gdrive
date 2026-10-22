@@ -164,11 +164,15 @@ Never enter a signing key, SMTP password, or full license into chat or CI logs.
 cd /opt/electridrive-license/app
 
 # Read-only: checks the existing processed ledger.
-sudo /opt/electridrive-license/.venv/bin/python -m server.license_recovery
+sudo -u electridrive-license /opt/electridrive-license/.venv/bin/python -m server.license_recovery
 
 # Optional: resend for a processed PayPal txn after manual verification.
-sudo /opt/electridrive-license/.venv/bin/python -m server.license_recovery --resend
+sudo -u electridrive-license /opt/electridrive-license/.venv/bin/python -m server.license_recovery --resend
 ```
+
+Run **as the service user**, not root. Running as root could create a
+root-owned processed-ledger lock and prevent subsequent Gunicorn payments.
+The recovery command actively refuses root execution.
 
 The operator enters the transaction ID interactively, and must cross-check
 that PayPal lists this payment as completed, not refunded/reversed, and
