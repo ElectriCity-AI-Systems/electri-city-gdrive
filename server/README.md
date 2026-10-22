@@ -23,8 +23,8 @@ PAYPAL_RECEIVER_EMAIL=<PayPal merchant address>
 PAYPAL_CURRENCY=EUR
 # REQUIRED before updating the running service: match actual VERIFIED ElectriDrive IPN.
 # See section "Product binding" below for validation.
-PAYPAL_PRODUCT_FIELD=<item_number|item_name|custom>
-PAYPAL_PRODUCT_VALUE=<exact verified ElectriDrive Pro value>
+PAYPAL_PRODUCT_FIELD=item_name
+PAYPAL_PRODUCT_VALUE=For Pro Subscription - ElectriDrive
 SIGNING_KEY_PATH=/opt/electridrive-license/secrets/license_signing_key.pem
 MIN_AMOUNT=0
 SMTP_HOST=smtp.ionos.de
@@ -70,12 +70,21 @@ tickets or chats. Compare against a known community donation. If no reliable
 marker exists, **do not deploy this change yet**: first arrange separate
 payment routing or a stronger server-side purchase verification approach.
 
-Example only; NOT a verified value for the existing PayPal hosted button:
+**Confirmed live IPN example (21 Oct 2026):** The existing ElectriDrive
+Pro payment supplied `item_name=For Pro Subscription - ElectriDrive`,
+`item_number=` and `custom=` (empty), `payment_status=Completed`,
+`mc_currency=EUR`, and `txn_type=web_accept`. The production values
+above are derived from that actual notification and should **not** be
+substituted with the hosted-button ID or a placeholder string. The
+descriptive term “Subscription” is part of the exact stored item name;
+the observed `web_accept` payment was a one-time payment rather than
+proof of a recurring subscription.
 
-```ini
-PAYPAL_PRODUCT_FIELD=item_number
-PAYPAL_PRODUCT_VALUE=electridrive-pro
-```
+**Before deployment**, independently verify that community donation
+notifications do **not** have the exact same `item_name`, and that the
+configured ElectriDrive button has not been renamed. If this cannot be
+verified, stop: PayPal's pass-through item name is not a fully
+tamper-resistant product-to-order binding.
 
 With a marker configured, missing/different product metadata gets HTTP 200
 (verified unrelated payment, no license). An absent/invalid marker configuration
