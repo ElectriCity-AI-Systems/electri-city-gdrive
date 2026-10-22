@@ -91,11 +91,23 @@ descriptive term “Subscription” is part of the exact stored item name;
 the observed `web_accept` payment was a one-time payment rather than
 proof of a recurring subscription.
 
-**Before deployment**, independently verify that community donation
-notifications do **not** have the exact same `item_name`, and that the
-configured ElectriDrive button has not been renamed. If this cannot be
-verified, stop: PayPal's pass-through item name is not a fully
-tamper-resistant product-to-order binding.
+**Cross-product IPN evidence confirmed (22 Oct 2026):** A genuine
+Community Support payment notification from 9 Oct 2026 used
+`item_name=Only for Community Support`, `item_number=Music Production`,
+`mc_currency=USD`, and a nonempty `custom`. PayPal delivered it to the
+**separate WordPress** IPN endpoint on `electri-c-ity-studios-24-7.com`
+(`/wp-json/ecity-supporters/v1/ipn`, HTTP 200). The confirmed ElectriDrive Pro
+IPN was delivered to `license.electri-c-ity-studios.com/paypal/ipn`
+(HTTP 200) with the different exact `item_name` shown above. No personal
+payer data, IPN raw messages, transaction IDs, or private credentials are
+retained here. Unit tests check that even a Community Support notification
+changed to EUR cannot pass the ElectriDrive product check.
+
+This proves separation **for the two observed transactions**; confirm the
+PayPal product label has not been edited before deploying or modifying the
+hosted button. It does not make `item_name` a cryptographic purchase reference.
+If stronger fraud resistance is required, implement server-side PayPal order
+verification with a server-issued product/order reference.
 
 With a marker configured, missing/different product metadata gets HTTP 200
 (verified unrelated payment, no license). An absent/invalid marker configuration
@@ -208,8 +220,11 @@ Do not regenerate the private signing key.
 
 ### Deployment gate
 
-Do not deploy until the exact marker is confirmed from a genuine ElectriDrive
-Pro PayPal notification and the community-button value is also checked.
+Both product-marker checks now have evidence from genuine PayPal notifications,
+including confirmation of the two distinct IPN endpoints. The remaining
+deployment gates are successful CI on the final commit, owner approval,
+service-config read-back, and protected rollback of the exact live release.
+The product label must not change unnoticed.
 Before restarting, preserve a backup of the exact current application version,
 service environment, private key path and processed ledger. Do not copy the
 private key into git, CI artifacts or the deployment bundle. Use the CI-proven
