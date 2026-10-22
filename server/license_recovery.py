@@ -96,6 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resend", action="store_true",
                         help="explicitly offer manual reissue after checking PayPal")
     args = parser.parse_args(argv)
+    # The service owns processed.txt and its advisory lock. Running as root
+    # could create a root-owned lock file and block future Gunicorn workers.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        print("STOP: run as electridrive-license user, never as root", file=sys.stderr)
+        return 2
     if not args.env_file.is_file():
         print("STOP: service environment file not found", file=sys.stderr)
         return 2
