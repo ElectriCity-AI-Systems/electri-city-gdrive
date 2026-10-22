@@ -259,3 +259,24 @@ def test_should_grant_checks_product_field_when_configured():
         valid, "merchant@example.com", 0, "EUR", "item_number", "other-product"
     )
     assert not ok and reason == "product mismatch"
+
+
+def test_should_grant_never_issues_for_zero_or_negative_amount():
+    for value in ("0", "0.00", "-0.01", "-3.00"):
+        payment = _completed_ipn()
+        payment["mc_gross"] = value
+        ok, _ = ls.should_grant(
+            payment, "merchant@example.com", 0, "EUR", "item_number", "electridrive-pro"
+        )
+        assert not ok, f"Zero/negative payment incorrectly licensed: {value}"
+
+
+def test_ipn_zero_amount_does_not_issue_even_with_matching_product(
+        tmp_path, monkeypatch):
+    client = _client(monkeypatch, tmp_path)
+    zero = _completed_ipn("ZERO01")
+    zero["mc_gross"] = "0.00"
+    monkeypatch.setattr(ls, "issue_key", lambda *_: (_ for _ in ()).throw(
+        AssertionError("zero amount must not issue license")))
+    assert client.post("/paypal/ipn", data=zero).status_code == 200
+    assert not ls.already_processed("ZERO01")
