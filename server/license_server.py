@@ -75,8 +75,8 @@ def should_grant(
         minimum = Decimal(str(min_amount))
     except (InvalidOperation, TypeError, ValueError):
         return False, "invalid amount"
-    if not amount.is_finite() or amount < minimum:
-        return False, "amount below minimum"
+    if not amount.is_finite() or amount <= 0 or amount < minimum:
+        return False, "amount not positive or below minimum"
     if expected_currency and form.get("mc_currency", "").upper() != expected_currency.upper():
         return False, "currency mismatch"
     if not form.get("payer_email"):
