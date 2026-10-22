@@ -72,7 +72,7 @@ def _completed_ipn(txn_id="TESTTXN001"):
         "mc_gross": "5.00",
         "mc_currency": "EUR",
         "txn_id": txn_id,
-        "item_number": "electridrive-pro",
+        "item_name": "For Pro Subscription - ElectriDrive",
     }
 
 
@@ -80,8 +80,8 @@ def _client(monkeypatch, tmp_path, receiver="merchant@example.com"):
     monkeypatch.setenv("PROCESSED_FILE", str(tmp_path / "processed.txt"))
     monkeypatch.setenv("MIN_AMOUNT", "0")
     monkeypatch.setenv("PAYPAL_CURRENCY", "EUR")
-    monkeypatch.setenv("PAYPAL_PRODUCT_FIELD", "item_number")
-    monkeypatch.setenv("PAYPAL_PRODUCT_VALUE", "electridrive-pro")
+    monkeypatch.setenv("PAYPAL_PRODUCT_FIELD", "item_name")
+    monkeypatch.setenv("PAYPAL_PRODUCT_VALUE", "For Pro Subscription - ElectriDrive")
     if receiver is None:
         monkeypatch.delenv("PAYPAL_RECEIVER_EMAIL", raising=False)
     else:
@@ -210,7 +210,7 @@ def test_license_message_has_traceable_id_without_private_data_in_headers():
 def test_ipn_general_community_donation_cannot_grant_pro(tmp_path, monkeypatch):
     client = _client(monkeypatch, tmp_path)
     unrelated = _completed_ipn("UNRELATED01")
-    unrelated["item_number"] = "studios-community-support"
+    unrelated["item_name"] = "Electri_C_ity - Studios Community Support"
     monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
         AssertionError("unrelated donation must never be licensed")))
     assert client.post("/paypal/ipn", data=unrelated).status_code == 200
@@ -220,7 +220,7 @@ def test_ipn_general_community_donation_cannot_grant_pro(tmp_path, monkeypatch):
 def test_ipn_missing_product_metadata_cannot_grant_pro(tmp_path, monkeypatch):
     client = _client(monkeypatch, tmp_path)
     missing_marker = _completed_ipn("NOMARKER01")
-    missing_marker.pop("item_number")
+    missing_marker.pop("item_name")
     monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
         AssertionError("unidentifiable payment must not be licensed")))
     assert client.post("/paypal/ipn", data=missing_marker).status_code == 200
@@ -253,10 +253,10 @@ def test_ipn_unsupported_product_field_configuration_retries(
 def test_should_grant_checks_product_field_when_configured():
     valid = _completed_ipn()
     assert ls.should_grant(
-        valid, "merchant@example.com", 0, "EUR", "item_number", "electridrive-pro"
+        valid, "merchant@example.com", 0, "EUR", "item_name", "For Pro Subscription - ElectriDrive"
     )[0]
     ok, reason = ls.should_grant(
-        valid, "merchant@example.com", 0, "EUR", "item_number", "other-product"
+        valid, "merchant@example.com", 0, "EUR", "item_name", "Electri_C_ity - Studios Community Support"
     )
     assert not ok and reason == "product mismatch"
 
@@ -266,7 +266,7 @@ def test_should_grant_never_issues_for_zero_or_negative_amount():
         payment = _completed_ipn()
         payment["mc_gross"] = value
         ok, _ = ls.should_grant(
-            payment, "merchant@example.com", 0, "EUR", "item_number", "electridrive-pro"
+            payment, "merchant@example.com", 0, "EUR", "item_name", "For Pro Subscription - ElectriDrive"
         )
         assert not ok, f"Zero/negative payment incorrectly licensed: {value}"
 
@@ -280,3 +280,43 @@ def test_ipn_zero_amount_does_not_issue_even_with_matching_product(
         AssertionError("zero amount must not issue license")))
     assert client.post("/paypal/ipn", data=zero).status_code == 200
     assert not ls.already_processed("ZERO01")
+
+
+def test_real_world_electridrive_product_marker_from_redacted_ipn():
+    """Synthetic IPN shaped like the observed October Pro donation (no PII)."""
+    form = _completed_ipn("SYNTHETIC01")
+    form.update({
+        "item_name": "For Pro Subscription - ElectriDrive",
+        "item_number": "",
+        "custom": "",
+        "txn_type": "web_accept",
+        "mc_gross": "3.00",
+        "mc_currency": "EUR",
+        "quantity": "1",
+    })
+    assert ls.should_grant(
+        form,
+        "merchant@example.com",
+        0,
+        "EUR",
+        "item_name",
+        "For Pro Subscription - ElectriDrive",
+    ) == (True, "ok")
+    for changed_field, changed_value in [
+        ("item_name", "Electri_C_ity - Studios Community Support"),
+        ("item_name", ""),
+        ("mc_currency", "USD"),
+        ("payment_status", "Pending"),
+        ("mc_gross", "0.00"),
+    ]:
+        variant = dict(form)
+        variant[changed_field] = changed_value
+        result, _reason = ls.should_grant(
+            variant,
+            "merchant@example.com",
+            0,
+            "EUR",
+            "item_name",
+            "For Pro Subscription - ElectriDrive",
+        )
+        assert not result, (changed_field, changed_value)
