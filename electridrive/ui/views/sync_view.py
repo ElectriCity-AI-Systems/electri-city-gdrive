@@ -106,6 +106,11 @@ class SyncView(QWidget):
         sync_btn.setEnabled(pair.enabled)
         top.addWidget(sync_btn)
 
+        toggle = QPushButton("Disable" if pair.enabled else "Enable")
+        toggle.setProperty("ghost", True)
+        toggle.clicked.connect(lambda: self._toggle_pair(index))
+        top.addWidget(toggle)
+
         remove = QPushButton("Remove")
         remove.setProperty("ghost", True)
         remove.setProperty("danger", True)
@@ -205,8 +210,74 @@ class SyncView(QWidget):
             ["two_way", "up_only", "down_only"], 0, False)
         if not ok:
             return
+        if self._overlapping_pair(local, remote.strip()):
+            QMessageBox.warning(
+                self, "Duplicate sync scope",
+                "An existing sync pair already uses this local folder or "
+                "Drive destination. Remove the duplicate or choose a separate "
+                "test folder; no changes were saved.",
+            )
+            return
+        # Safe default: adding a pair must never silently authorize a write
+        # to personal Drive data, including when Sync all is clicked.
         self._session.settings.sync_pairs.append(
-            SyncPair(local_path=local, remote_folder=remote.strip(), direction=direction))
+            SyncPair(local_path=local, remote_folder=remote.strip(),
+                     direction=direction, enabled=False))
+        self._session.save()
+        self._reload()
+
+    def _overlapping_pair(self, local: str, remote: str, *, exclude: int = -1) -> bool:
+        canonical_local = Path(local).expanduser().resolve(strict=False)
+        canonical_remote = "/".join(
+            p for p in remote.replace("\\", "/").split("/") if p.strip()
+        )
+        for i, pair in enumerate(self._session.settings.sync_pairs):
+            if i == exclude:
+                continue
+            if (Path(pair.local_path).expanduser().resolve(strict=False)
+                    == canonical_local):
+                return True
+            other_remote = "/".join(
+                p for p in pair.remote_folder.replace("\\", "/").split("/")
+                if p.strip()
+            )
+            if other_remote == canonical_remote:
+                return True
+        return False
+
+    def _toggle_pair(self, index: int):
+        pairs = self._session.settings.sync_pairs
+        if not (0 <= index < len(pairs)):
+            return
+        pair = pairs[index]
+        if not pair.enabled:
+            if self._overlapping_pair(
+                pair.local_path, pair.remote_folder, exclude=index
+            ):
+                QMessageBox.warning(
+                    self, "Duplicate sync scope",
+                    "This pair overlaps another configured pair. Resolve the "
+                    "duplicate before enabling any writes.",
+                )
+                return
+            if QMessageBox.question(
+                self, "Enable sync pair?",
+                f"Local: {pair.local_path}\n"
+                f"Drive: {pair.remote_folder}\n"
+                f"Direction: {pair.direction}\n\n"
+                "Enable this pair for future Sync now / Sync all actions? "
+                "No transfer starts immediately.",
+            ) != QMessageBox.Yes:
+                return
+            pair.enabled = True
+        else:
+            if QMessageBox.question(
+                self, "Disable sync pair?",
+                "Disable this pair for future sync actions?\n\n"
+                "This does NOT cancel any transfer already in progress.",
+            ) != QMessageBox.Yes:
+                return
+            pair.enabled = False
         self._session.save()
         self._reload()
 
