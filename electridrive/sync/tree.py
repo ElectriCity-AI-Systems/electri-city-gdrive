@@ -67,12 +67,23 @@ def scan_local_tree(root: Path, rules: SyncRules | None = None) -> LocalTree:
             rel = path.relative_to(canonical).as_posix()
             try:
                 if entry.is_symlink():
-                    excluded.append(rel)
+                    if rules.fail_on_unsupported:
+                        errors.append(
+                            f"unsupported symlink {rel}: full backup cannot preserve "
+                            "a symlink without changing its meaning"
+                        )
+                    else:
+                        excluded.append(rel)
                     continue
                 is_dir = entry.is_dir(follow_symlinks=False)
                 is_file = entry.is_file(follow_symlinks=False)
                 if not is_dir and not is_file:
-                    excluded.append(rel)
+                    if rules.fail_on_unsupported:
+                        errors.append(
+                            f"unsupported filesystem entry {rel}: not a regular file or directory"
+                        )
+                    else:
+                        excluded.append(rel)
                     continue
                 size = entry.stat(follow_symlinks=False).st_size if is_file else None
             except OSError as exc:
