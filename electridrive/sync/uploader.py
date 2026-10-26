@@ -35,10 +35,12 @@ def plan_upload(client, local_path: Path, parent_id: str, rules: SyncRules | Non
     `.create_folder(name, parent)`.
     """
     local_path = Path(local_path).expanduser()
-    rules = rules or SyncRules()
+    rules = rules if rules is not None else SyncRules.full_backup()
     items: list[UploadItem] = []
 
     if local_path.is_symlink():
+        if rules.fail_on_unsupported:
+            raise ValueError("Selected symlink cannot be faithfully uploaded to Google Drive")
         return items
 
     local_path = local_path.resolve()
@@ -51,10 +53,10 @@ def plan_upload(client, local_path: Path, parent_id: str, rules: SyncRules | Non
         return items
 
     if local_path.is_dir():
-        root_remote = _find_or_create_child(client, local_path.name, parent_id)
         tree = scan_local_tree(local_path, rules)
         if tree.errors:
             raise RuntimeError("Incomplete local traversal: " + "; ".join(tree.errors))
+        root_remote = _find_or_create_child(client, local_path.name, parent_id)
 
         remote_dirs: dict[str, str] = {"": root_remote}
         for directory in sorted(
