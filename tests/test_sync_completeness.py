@@ -215,7 +215,8 @@ def test_download_only_syncs_exact_recursive_tree_and_remote_empty_folders(
     fake.add_file("inside.txt", b"excluded", parent=hidden_folder)
     local_root = tmp_path / "not-created-yet"
     pair = SyncPair(
-        str(local_root), "ElectriDrive/Complete Download", direction="down_only"
+        str(local_root), "ElectriDrive/Complete Download", direction="down_only",
+        include_all_files=False,  # explicit legacy mode for exclusion test
     )
     db = SyncDatabase(tmp_path / "download.sqlite3")
     try:
