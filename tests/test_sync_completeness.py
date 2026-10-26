@@ -8,6 +8,7 @@ from electridrive.google_api.client import export_format_for
 from electridrive.storage.database import SyncDatabase
 from electridrive.sync.downloader import plan_download, sanitize_name
 from electridrive.sync.engine import UploadOnlySyncEngine
+from electridrive.sync.rules import SyncRules
 from electridrive.sync.runner import run_configured_pairs
 from electridrive.sync.twoway import TwoWaySyncEngine
 from electridrive.sync.uploader import plan_upload
@@ -166,7 +167,10 @@ def test_upload_only_syncs_exact_recursive_tree_empty_folders_and_reuses_ids(
     existing_file = fake.add_file("root.txt", b"old", parent=remote_root)
     db = SyncDatabase(tmp_path / "upload.sqlite3")
     try:
-        engine = UploadOnlySyncEngine(drive_client=fake, database=db)
+        # This fixture specifically checks legacy filtered mode. Full backup
+        # defaults are verified separately by tests/test_full_backup_default.py.
+        engine = UploadOnlySyncEngine(drive_client=fake, database=db,
+                                      rules=SyncRules())
         first = engine.sync_up(root, "ElectriDrive/Complete Upload")
 
         assert first.scanned == len(FILES)
