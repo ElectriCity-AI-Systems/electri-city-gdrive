@@ -491,3 +491,123 @@ def test_changes_api_failure_keeps_full_scan_correct(tmp_path: Path):
         assert db.get_change_token(engine.change_token_key) is None
     finally:
         db.close()
+
+
+# ------------------------------------------------------ upload-only duplicates
+def test_up_only_ignores_unrelated_remote_duplicates_without_touching_them(
+    tmp_path: Path,
+):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    (root / "local.txt").write_bytes(b"safe upload")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    first = fake.add_file("remote-only.txt", b"old-a", parent=folder)
+    second = fake.add_file("remote-only.txt", b"old-b", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+    try:
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed == 0 and report.uploaded == 1
+        assert report.downloaded == report.trashed_local == report.trashed_remote == 0
+        assert fake.nodes[first]["content"] == b"old-a"
+        assert fake.nodes[second]["content"] == b"old-b"
+        assert not fake.nodes[first]["trashed"]
+        assert not fake.nodes[second]["trashed"]
+        assert not (root / "remote-only.txt").exists()
+        assert {item[2] for item in fake.uploads} == {"local.txt"}
+        assert not fake.updates
+    finally:
+        db.close()
+
+
+def test_up_only_refuses_ambiguous_existing_upload_target(tmp_path: Path):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    (root / "target.txt").write_bytes(b"my local truth")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    first = fake.add_file("target.txt", b"one", parent=folder)
+    second = fake.add_file("target.txt", b"two", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed >= 1
+        assert any("ambiguous upload target" in e for e in report.errors)
+        assert not fake.uploads and not fake.updates
+        assert fake.nodes[first]["content"] == b"one"
+        assert fake.nodes[second]["content"] == b"two"
+        assert (root / "target.txt").read_bytes() == b"my local truth"
+    finally:
+        db.close()
+
+
+def test_up_only_uses_recorded_remote_id_when_duplicates_appear(tmp_path: Path):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local_file = root / "target.txt"
+    local_file.write_bytes(b"base")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    canonical = fake.add_file("target.txt", b"base", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        engine = TwoWaySyncEngine(fake, db, pair)
+        initial = engine.run()
+        assert initial.failed == 0
+        assert db.get_sync_item(engine.pair_id, "target.txt").remote_id == canonical
+        duplicate = fake.add_file("target.txt", b"unrelated version", parent=folder)
+        local_file.write_bytes(b"fresh local")
+        report = engine.run()
+        assert report.failed == 0 and report.uploaded == 1
+        assert fake.nodes[canonical]["content"] == b"fresh local"
+        assert fake.nodes[duplicate]["content"] == b"unrelated version"
+        assert len(fake.updates) == 1
+        assert fake.updates[0][0] == canonical
+        assert not fake.nodes[duplicate]["trashed"]
+    finally:
+        db.close()
+
+
+def test_up_only_rechecks_cached_duplicate_paths_when_local_file_appears(
+    tmp_path: Path,
+):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    fake.add_file("now-local.txt", b"a", parent=folder)
+    fake.add_file("now-local.txt", b"b", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        engine = TwoWaySyncEngine(fake, db, pair)
+        assert engine.run().failed == 0
+        # There are no Drive changes; _remote_for_run reuses an in-memory tree.
+        (root / "now-local.txt").write_bytes(b"new data")
+        second = engine.run()
+        assert second.failed >= 1
+        assert any("ambiguous upload target" in e for e in second.errors)
+        assert not fake.uploads and not fake.updates
+    finally:
+        db.close()
+
+
+def test_two_way_keeps_fail_closed_on_identical_remote_paths(tmp_path: Path):
+    root = tmp_path / "sync"
+    root.mkdir()
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    fake.add_file("same.txt", b"a", parent=folder)
+    fake.add_file("same.txt", b"b", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        report = TwoWaySyncEngine(fake, db, _pair(root)).run()
+        assert report.failed >= 1
+        assert any("duplicate remote file path" in e for e in report.errors)
+        assert not fake.uploads and not fake.updates
+        assert not (root / "same.txt").exists()
+    finally:
+        db.close()
