@@ -58,3 +58,23 @@ def test_cli_upload_engine_refuses_unsupported_link_without_mutations(
         assert not fake.updates
     finally:
         db.close()
+
+
+
+def test_existing_saved_upload_pair_inherits_unfiltered_backup_mode():
+    from electridrive.config import Settings
+    legacy_settings = Settings.from_dict({
+        "sync_pairs": [
+            {"local_path": "/home/example/Musik",
+             "remote_folder": "ElectriDrive/Musik",
+             "direction": "up_only", "enabled": False},
+            {"local_path": "/home/example/Brain",
+             "remote_folder": "ElectriDrive/Brain",
+             "direction": "up_only", "enabled": False},
+        ]
+    })
+    assert len(legacy_settings.sync_pairs) == 2
+    assert all(p.include_all_files for p in legacy_settings.sync_pairs)
+    assert not any(p.enabled for p in legacy_settings.sync_pairs)
+    assert all(p.include_all_files for p in
+               Settings.from_dict(legacy_settings.to_dict()).sync_pairs)
