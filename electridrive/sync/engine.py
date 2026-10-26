@@ -51,7 +51,12 @@ class UploadOnlySyncEngine:
             self.log_callback(message)
 
     def iter_candidate_files(self, root: Path) -> Iterable[Path]:
-        yield from scan_local_tree(root, self.rules).files
+        inventory = scan_local_tree(root, self.rules)
+        if inventory.errors and self.rules.fail_on_unsupported:
+            raise RuntimeError(
+                "Incomplete full-backup inventory: " + "; ".join(inventory.errors)
+            )
+        yield from inventory.files
 
     def should_upload(self, file_path: Path, sha256: str) -> bool:
         stat = file_path.stat()
