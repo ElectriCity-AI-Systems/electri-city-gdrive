@@ -269,7 +269,13 @@ class TwoWaySyncEngine:
         self.client = client
         self.db = db
         self.pair = pair
-        self.rules = rules or SyncRules()
+        # Full backup is the default for configured sync pairs, including
+        # existing settings saved before include_all_files was introduced.
+        # Explicit rule objects still take precedence for expert callers.
+        self.rules = (
+            rules if rules is not None else
+            (SyncRules.full_backup() if pair.include_all_files else SyncRules())
+        )
         self.log_cb = log_cb
         self.local_root = Path(pair.local_path).expanduser()
         self.pair_id = pair_id_for(pair.local_path, pair.remote_folder)
