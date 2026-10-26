@@ -156,11 +156,42 @@ python -m electridrive.cli unmount ~/ElectriDrive
   edited Office export back into a Doc, Sheet, or Slide and never converts native content.
 - The Virtual Drive is explicitly **read-only** in 2.1.3. Writable mounts are rejected
   before mounting; unsafe partial-write semantics are not exposed.
-- Default excludes (sync/upload): `.git`, `node_modules`, `__pycache__`, `.venv`, caches,
-  temp files, hidden files, and `.electridrive-trash` (configurable). Excluded entries are
-  counted in sync reports. Descendant symlinks and special files are never followed.
+- **Full backup by default (configured sync and manual upload):** every
+  **regular file and directory** inside the explicitly selected root is included,
+  regardless of name, leading dot, extension, size, or content. This includes
+  `.git`, `.venv`, `node_modules`, hidden files, temporary files and
+  credentials. Existing saved sync pairs inherit `include_all_files=true`;
+  `include_all_files=false` explicitly retains the legacy filters.
+- **No false completeness claim:** symlinks (including links inside virtual
+  environments) and Linux special files cannot be represented faithfully as
+  ordinary Google Drive files. Full backup flags them as errors and aborts
+  before Drive writes, rather than silently skipping them. Permissions,
+  live-changing files, Google Drive limitations and duplicate remote names
+  can also prevent a completed backup. A successful upload is not an
+  encrypted system image: file modes, owners and filesystem links are not
+  preserved.
+- **Privacy:** ElectriDrive does not add client-side encryption. Uploaded
+  credentials, API tokens and private keys are readable to people/services
+  with access to the corresponding Drive files. Encrypt sensitive archives
+  before upload if confidential backup is required.
 
 ## Sync behavior in 2.1.0
+
+### Unfiltered full-backup policy
+
+`SyncPair.include_all_files` defaults to `true` for **new and existing**
+saved pairs. The two-way engine and GUI `Sync now`/`Sync all` paths use
+`SyncRules.full_backup()` unless an explicit filtered mode is selected.
+The standalone `sync-up` command and folder upload planner also use this
+default. An explicit `SyncRules()` object or
+`SyncPair(include_all_files=False)` provides compatibility for workflows
+that intentionally exclude build files.
+
+**Do not enable the three existing personal pairs until the source tree is
+preflighted.** Their Google Drive destinations contain known same-name
+duplicate objects; any ambiguous upload target must remain blocked until
+a canonical Drive ID is safely confirmed. No automatic rename/delete is
+performed. Existing disabled pair settings remain disabled.
 
 ### Complete selected trees
 
