@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from electridrive.sync.uploader import plan_upload
+from electridrive.sync.rules import SyncRules
 from fakes import FakeDrive
 
 
@@ -25,7 +26,7 @@ def test_plan_upload_folder_mirrors_tree_and_excludes(tmp_path: Path):
     (root / "node_modules" / "x.js").write_text("no", encoding="utf-8")
 
     fake = FakeDrive()
-    items = plan_upload(fake, root, "root")
+    items = plan_upload(fake, root, "root", rules=SyncRules())
 
     names = sorted(i.name for i in items)
     assert names == ["deep.txt", "keep.txt"]
@@ -48,3 +49,30 @@ def test_plan_upload_reuses_existing_remote_folder(tmp_path: Path):
     projs = [n for n in fake.nodes.values() if n["name"] == "proj"]
     assert len(projs) == 1
     assert projs[0]["id"] == existing
+
+
+
+def test_plan_upload_default_includes_every_regular_file(tmp_path: Path):
+    root = tmp_path / "all"
+    root.mkdir()
+    for rel in (".env", ".git/config", "node_modules/index.js", "wait.part"):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"placeholder")
+    fake = FakeDrive()
+    items = plan_upload(fake, root, "root")
+    assert sorted(x.name for x in items) == [
+        ".env", "config", "index.js", "wait.part",
+    ]
+
+
+def test_plan_upload_rejects_symlinks_before_creating_drive_folders(tmp_path: Path):
+    root = tmp_path / "all"
+    root.mkdir()
+    (root / "real.txt").write_bytes(b"test")
+    (root / "alias").symlink_to(root / "real.txt")
+    fake = FakeDrive()
+    import pytest
+    with pytest.raises(RuntimeError, match="unsupported symlink"):
+        plan_upload(fake, root, "root")
+    assert len(fake.nodes) == 1
