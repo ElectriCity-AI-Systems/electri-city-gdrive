@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from electridrive.config import Settings, SyncPair
@@ -18,6 +18,18 @@ from electridrive.ui.views.sync_view import SyncView
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def _dispose(view, qapp):
+    """Flush Qt DeferredDelete after the GUI dynamically rebuilds cards.
+
+    Closing a top-level widget alone leaves pending QObject destruction
+    until interpreter teardown, which can crash PySide's QApplication.
+    """
+    view.close()
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    qapp.processEvents()
 
 
 class FakeSession:
@@ -50,7 +62,7 @@ def test_disabled_pair_card_cannot_start_sync_even_with_client(qapp, tmp_path):
         view._sync_now(pair, QLabel(), QPushButton())
         assert session.submitted == []
     finally:
-        view.close()
+        _dispose(view, qapp)
 
 
 def test_enabled_pair_still_has_actionable_sync_button(qapp, tmp_path):
@@ -70,7 +82,7 @@ def test_enabled_pair_still_has_actionable_sync_button(qapp, tmp_path):
         # No click or API call; existing enabled state remains visible.
         assert session.submitted == []
     finally:
-        view.close()
+        _dispose(view, qapp)
 
 
 def test_gui_new_pair_starts_disabled_and_requires_explicit_enable(
@@ -117,7 +129,7 @@ def test_gui_new_pair_starts_disabled_and_requires_explicit_enable(
         assert session.settings.sync_pairs[0].enabled is False
         assert len(saved) == 3
     finally:
-        view.close()
+        _dispose(view, qapp)
 
 
 def test_gui_rejects_duplicate_local_scope_even_with_disabled_pair(
@@ -152,7 +164,7 @@ def test_gui_rejects_duplicate_local_scope_even_with_disabled_pair(
         assert len(session.settings.sync_pairs) == 1
         assert session.submitted == []
     finally:
-        view.close()
+        _dispose(view, qapp)
 
 
 def test_gui_refuses_enable_when_two_disabled_pairs_share_drive_destination(
@@ -176,4 +188,4 @@ def test_gui_refuses_enable_when_two_disabled_pairs_share_drive_destination(
         assert not session.settings.sync_pairs[0].enabled
         assert not session.settings.sync_pairs[1].enabled
     finally:
-        view.close()
+        _dispose(view, qapp)
