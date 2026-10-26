@@ -282,6 +282,9 @@ class TwoWaySyncEngine:
         self._remote_dirs: set[str] = set()
         self._local_scan_errors: list[str] = []
         self._remote_scan_errors: list[str] = []
+        # Drive allows multiple distinct file IDs under the same folder/name.
+        # Retain all IDs so upload-only can reject ambiguous write targets.
+        self._duplicate_remote_ids: dict[str, set[str]] = {}
         self._local_excluded = 0
         self._remote_excluded = 0
 
@@ -319,6 +322,7 @@ class TwoWaySyncEngine:
         self._dir_ids = {"": root_id}
         self._remote_dirs = set()
         self._remote_scan_errors = []
+        self._duplicate_remote_ids = {}
         self._remote_excluded = 0
         entries: dict[str, RemoteEntry] = {}
         self._walk_remote(root_id, "", entries, {root_id})
@@ -421,6 +425,23 @@ class TwoWaySyncEngine:
         preferred = self._canonical_ids.get(candidate.rel)
         cross_type_collision = existing.is_google_doc != candidate.is_google_doc
         if not cross_type_collision:
+            if existing.file_id == candidate.file_id:
+                # Repeated paginated API item; one Drive object, not two.
+                entries[candidate.rel] = candidate
+                return
+            if self.pair.direction == "up_only":
+                # Remote-only objects will never be downloaded, updated or
+                # trashed in upload-only mode. Track ambiguous IDs rather than
+                # blocking unrelated local uploads. Validate every local upload
+                # target *after* the entire remote traversal is complete,
+                # including when a Changes API cache is reused.
+                duplicates = self._duplicate_remote_ids.setdefault(
+                    candidate.rel, {existing.file_id}
+                )
+                duplicates.add(candidate.file_id)
+                if preferred == candidate.file_id:
+                    entries[candidate.rel] = candidate
+                return
             if preferred and candidate.file_id == preferred:
                 entries[candidate.rel] = candidate
             self._remote_scan_errors.append(
@@ -612,6 +633,21 @@ class TwoWaySyncEngine:
         report.scanned_remote_files = len(remote)
         report.scanned_remote_folders = len(self._remote_dirs)
         report.excluded_remote = self._remote_excluded
+
+        if self.pair.direction == "up_only":
+            for rel, candidate_ids in sorted(self._duplicate_remote_ids.items()):
+                if rel not in local:
+                    # Upload-only never touches this remote-only path.
+                    continue
+                preferred = self._canonical_ids.get(rel)
+                if (not preferred or preferred not in candidate_ids
+                        or remote.get(rel) is None
+                        or remote[rel].file_id != preferred):
+                    # No arbitrary choice between distinct Drive IDs. Even
+                    # identical bytes would not establish canonical identity.
+                    self._remote_scan_errors.append(
+                        f"ambiguous upload target: duplicate remote file path at {rel!r}"
+                    )
         if self._remote_scan_errors:
             for error in self._remote_scan_errors:
                 self._report_failure(report, f"remote traversal incomplete: {error}")
