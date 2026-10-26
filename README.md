@@ -161,7 +161,10 @@ python -m electridrive.cli unmount ~/ElectriDrive
   regardless of name, leading dot, extension, size, or content. This includes
   `.git`, `.venv`, `node_modules`, hidden files, temporary files and
   credentials. Existing saved sync pairs inherit `include_all_files=true`;
-  `include_all_files=false` explicitly retains the legacy filters.
+  `include_all_files=false` explicitly retains the legacy filters. **Only in
+  two-way/download modes**, ElectriDrive's own `.electridrive-trash` is reserved
+  as a recovery folder and not mirrored back to Drive, avoiding accidental
+  resurrection of recently deleted files. Upload-only full backups include it.
 - **No false completeness claim:** symlinks (including links inside virtual
   environments) and Linux special files cannot be represented faithfully as
   ordinary Google Drive files. Full backup flags them as errors and aborts
