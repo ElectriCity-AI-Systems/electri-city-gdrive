@@ -95,7 +95,7 @@ class SyncView(QWidget):
         col.addWidget(sub)
         top.addLayout(col, 1)
 
-        status = QLabel("Ready")
+        status = QLabel("Ready" if pair.enabled else "Disabled")
         status.setProperty("role", "muted")
         status.setStyleSheet("font-size: 12px;")
         top.addWidget(status)
@@ -103,6 +103,7 @@ class SyncView(QWidget):
         sync_btn = QPushButton("Sync now")
         sync_btn.setProperty("ghost", True)
         sync_btn.clicked.connect(lambda: self._sync_now(pair, status, sync_btn))
+        sync_btn.setEnabled(pair.enabled)
         top.addWidget(sync_btn)
 
         remove = QPushButton("Remove")
@@ -114,7 +115,8 @@ class SyncView(QWidget):
         return card
 
     def _sync_now(self, pair: SyncPair, status: QLabel, btn: QPushButton):
-        if not self._session.client:
+        # Disabled pairs must stay inert even when called programmatically.
+        if not pair.enabled or not self._session.client:
             return
         btn.setEnabled(False)
         status.setText("Syncing…")
