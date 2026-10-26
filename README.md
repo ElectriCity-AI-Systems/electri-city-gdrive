@@ -164,6 +164,17 @@ python -m electridrive.cli unmount ~/ElectriDrive
 
 ### Complete selected trees
 
+**Upload-only duplicate-name handling.** Google Drive permits multiple
+distinct files with the same name in one folder. An upload-only pair ignores
+such duplicates **only when the ambiguous remote path is absent locally**;
+it never downloads, replaces, or trashes those remote-only files. When an
+ambiguous path exists locally, an upload proceeds only if previously saved
+sync history identifies one exact canonical Drive ID. Otherwise the pair
+fails closed, without uploading or overwriting an arbitrarily chosen file.
+Two-way/download-only modes retain strict ambiguity failures. Resolve
+ambiguous names manually after inspecting contents and Drive IDs—never
+automatically delete duplicate documents.
+
 Each enabled sync pair is an independent scope boundary. ElectriDrive inventories included
 files **and directories** recursively, mirrors empty and nested-empty directory trees, and
 preserves relative hierarchy. Local traversal never follows descendant symlinks. Remote names
