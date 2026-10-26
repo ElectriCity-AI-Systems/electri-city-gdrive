@@ -611,3 +611,89 @@ def test_two_way_keeps_fail_closed_on_identical_remote_paths(tmp_path: Path):
         assert not (root / "same.txt").exists()
     finally:
         db.close()
+
+
+
+def test_full_backup_upload_only_includes_hidden_credentials_build_and_temp_files(
+    tmp_path: Path,
+):
+    """All regular files in the explicitly selected root, including dotfiles."""
+    root = tmp_path / "selected-root"
+    root.mkdir()
+    contents = {
+        ".env": b"test-token-placeholder",
+        ".git/config": b"test-git-config",
+        ".venv/bin/python": b"test-venv-file",
+        "node_modules/lib/index.js": b"test-js",
+        "secret.tmp": b"test-temporary-file",
+        ".electridrive-trash/old.bak~": b"test-trash-copy",
+        ".hidden/credentials.json": b"test-oauth-placeholder",
+        "regular.txt": b"test-regular",
+    }
+    for name, data in contents.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    fake = FakeDrive()
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    pair = SyncPair(
+        str(root), "ElectriDrive/Test-Complete-Backup",
+        direction="up_only", delete_policy="off",
+    )
+    try:
+        assert pair.include_all_files
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == result.unexplained_omissions == 0
+        assert result.excluded_local == 0
+        assert result.uploaded == len(contents)
+        remote_names = {
+            n["name"]
+            for n in fake.nodes.values()
+            if n["mime"] != "application/vnd.google-apps.folder"
+            and not n["trashed"]
+        }
+        assert remote_names == {Path(p).name for p in contents}
+        assert all(not n["trashed"] for n in fake.nodes.values())
+    finally:
+        db.close()
+
+
+def test_full_backup_rejects_unsupported_symlink_without_drive_mutation(
+    tmp_path: Path,
+):
+    root = tmp_path / "selected-root"
+    root.mkdir()
+    (root / "regular.txt").write_bytes(b"safe")
+    (root / "alias").symlink_to(root / "regular.txt")
+    fake = FakeDrive()
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    pair = SyncPair(str(root), "ElectriDrive/Test-No-Silent-Skips",
+                    direction="up_only", delete_policy="off")
+    try:
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed == 1
+        assert any("unsupported symlink" in err for err in report.errors)
+        assert not fake.uploads and not fake.updates
+        assert len(fake.nodes) == 1  # no remote folder creation
+    finally:
+        db.close()
+
+
+def test_full_backup_can_be_explicitly_disabled_for_legacy_filtered_sync(
+    tmp_path: Path,
+):
+    root = tmp_path / "selected-root"
+    root.mkdir()
+    (root / ".secret").write_bytes(b"private")
+    (root / "plain.txt").write_bytes(b"plain")
+    fake = FakeDrive()
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    pair = SyncPair(str(root), "ElectriDrive/Test-Legacy-Filtered",
+                    direction="up_only", include_all_files=False)
+    try:
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == 0
+        assert result.excluded_local == 1
+        assert result.uploaded == 1
+    finally:
+        db.close()
