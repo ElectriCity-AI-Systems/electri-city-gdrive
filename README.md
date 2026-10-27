@@ -173,6 +173,11 @@ python -m electridrive.cli unmount ~/ElectriDrive
   can also prevent a completed backup. A successful upload is not an
   encrypted system image: file modes, owners and filesystem links are not
   preserved.
+- **Release blocker for roots containing symlinks:** full-tree backup is not
+  customer-acceptable for a selected tree with links until an explicitly
+  consented archive/manifest can preserve link types and targets without
+  following links outside the selected root. Do not bypass the current
+  fail-closed scan or claim such a run complete.
 - **Privacy:** ElectriDrive does not add client-side encryption. Uploaded
   credentials, API tokens and private keys are readable to people/services
   with access to the corresponding Drive files. Encrypt sensitive archives
