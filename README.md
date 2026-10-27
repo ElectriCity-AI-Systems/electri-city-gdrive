@@ -102,9 +102,17 @@ bash scripts/install_desktop.sh          # optional app-menu launcher
 
 ## Connect Google Drive
 
-**End users (shipped build):** just launch and click **Connect Google Drive** — the app has a
-built-in OAuth client (PKCE, loopback), so there is *no* `credentials.json` to create. Use
-**Add from Drive** to grant access to existing files/folders.
+**End users (verified customer release only):** install the published `.deb` or
+AppImage, launch ElectriDrive, and click **Connect Google Drive**. The official
+package **must embed** the publisher's Google Desktop OAuth client and Google
+Picker API key. Customers should **never** create a Google Cloud project, configure
+API keys, copy JSON files or use a terminal to sign in. Use **Add from Drive** to
+grant access to existing files/folders.
+
+**Developers:** a raw source checkout deliberately contains **no production
+OAuth keys**; it is not a customer installer. A checkout therefore prompts for
+developer OAuth configuration. Do not use source-checkout onboarding to judge
+the end-user installation experience.
 
 **Developers / distributors — set up the built-in client once:**
 1. In Google Cloud: create a project, enable the **Google Drive API** and **Google Picker API**.
@@ -311,7 +319,35 @@ bash scripts/build_deb.sh             # -> dist/deb/electridrive_<ver>_amd64.deb
 bash scripts/build_deb_in_container.sh # -> dist/electridrive_<ver>_amd64.deb + SHA256SUMS.txt
 ```
 
-Both scripts auto-bake the client if `ELECTRIDRIVE_CLIENT_ID` is set when you run them.
+**Customer release gate:** the official `.deb` and AppImage scripts now
+**refuse to build** unless the package embeds a validated Google Desktop OAuth
+client **and** Picker API key. Recommended build configuration:
+`ELECTRIDRIVE_APP_CLIENT_FILE=/path/to/publisher-app-client.json`
+(the JSON contains `installed` and `picker_api_key`; keep it outside the repo).
+Set the secret using protected build infrastructure, not GitHub source commits.
+The validator checks structure and Google endpoints without displaying keys.
+A build is **not approved for publication** until a human performs a clean
+Google login + Picker + file transfer test on the exact signed/shipped package.
+
+Only automated packaging smoke tests use `ALLOW_PLACEHOLDER_CLIENT=1`;
+their Debian packages carry `QA-NOT-FOR-DISTRIBUTION.txt`, and their artifact
+names start with `QA-ONLY-NOT-FOR-DISTRIBUTION`. A verified customer release
+cannot contain this marker, and `verify_deb.py --require-baked-client` rejects it.
+**Never publish a QA artifact.** Direct PyInstaller builds without configured
+OAuth are blocked too.
+
+**Customer acceptance (required before a stable release):** On an unmodified
+Ubuntu 26.04 desktop with no user OAuth configuration and a fresh account/profile,
+install the exact release artifact; connect a real Google account in its browser;
+select an existing Drive folder through the Picker; perform an upload and download
+and check file checksums; upload hidden files and `.git` using a fresh upload-only
+test pair; restart and reconnect; verify unexpected conflicts/remote duplicates
+fail safely; verify no unintended deletions. Google Cloud app consent/publishing
+status, quotas, Picker restrictions and true Google authentication **cannot be
+proven by offline CI**. Record these results before distributing to customers.
+
+Both scripts bake the real client from the supplied publisher config (or, for
+advanced packagers, `ELECTRIDRIVE_CLIENT_ID` plus secret and Picker API key).
 Official amd64 packages are built with the pinned release dependencies on Ubuntu 22.04
 (GLIBC 2.35), then checked so newer build hosts cannot silently raise that baseline.
 The container builds pinned Python 3.12.15 from the checksum-verified official
