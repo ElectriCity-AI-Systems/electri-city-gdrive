@@ -16,7 +16,9 @@ from PySide6.QtWidgets import (
 
 from electridrive.config import SyncPair
 from electridrive.ui import icons
-from electridrive.ui.drive_path_review import DrivePathReviewDialog, show_readable_warning
+from electridrive.ui.drive_path_review import (
+    DrivePathReviewDialog, show_readable_information, show_readable_warning,
+)
 from electridrive.ui.theme import Palette
 from electridrive.ui.widgets import Card, EmptyState, ProHint
 
@@ -151,7 +153,7 @@ class SyncView(QWidget):
             btn.setEnabled(True)
             status.setText("Failed")
             status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
-            QMessageBox.warning(self, "Sync failed", msg)
+            show_readable_warning(self, self._p, "Sync failed", msg)
 
         self._session.submit(work, done, fail)
 
@@ -185,16 +187,15 @@ class SyncView(QWidget):
                     f"enabled pairs.\n\n{detail}",
                 )
             else:
-                QMessageBox.information(
-                    self,
-                    "Sync complete",
+                show_readable_information(
+                    self, self._p, "Sync complete",
                     f"All {result.successful_pairs} enabled sync pairs completed.",
                 )
 
         def fail(msg):
             btn.setEnabled(True)
             btn.setText("Sync all")
-            QMessageBox.warning(self, "Sync all failed", msg)
+            show_readable_warning(self, self._p, "Sync all failed", msg)
 
         self._session.submit(work, done, fail)
 
@@ -214,9 +215,8 @@ class SyncView(QWidget):
             changed = True
         if changed:
             self._session.save()
-            QMessageBox.information(
-                self,
-                "Reviewed file choice saved",
+            show_readable_information(
+                self, self._p, "Reviewed file choice saved",
                 "The chosen Drive file ID was saved locally. No files were "
                 "changed. Review your choice before a separate Sync now.",
             )
