@@ -128,9 +128,18 @@ jobs:
               wait "$launcher" 2>/dev/null || true
             '
 
-      - name: Upload verified Debian package
+      - name: Confirm CI package is marked NOT FOR DISTRIBUTION
+        run: |
+          dpkg-deb --contents dist/electridrive_*_amd64.deb > package-contents.txt
+          grep -F 'QA-NOT-FOR-DISTRIBUTION.txt' package-contents.txt
+          if grep -F 'client_baked.json' package-contents.txt; then
+            echo "Unexpected embedded OAuth in the CI placeholder package" >&2
+            exit 1
+          fi
+
+      - name: Upload QA-only Debian package for automated testing
         uses: actions/upload-artifact@v6
         with:
-          name: electridrive-debian-${{ matrix.os }}-${{ github.sha }}
+          name: QA-ONLY-NOT-FOR-DISTRIBUTION-${{ matrix.os }}-${{ github.sha }}
           path: dist/electridrive_*_amd64.deb
           if-no-files-found: error
