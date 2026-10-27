@@ -242,7 +242,11 @@ def _verify_baked_client(root: Path) -> tuple[list[str], list[str]]:
     clients = list(root.rglob("client_baked.json"))
     if len(clients) != 1:
         return ["release package must contain exactly one baked OAuth client"], []
-    from validate_distribution_oauth import validate_client_file
+    try:
+        from scripts.validate_distribution_oauth import validate_client_file
+    except ModuleNotFoundError:
+        # Direct invocation: python scripts/verify_deb.py
+        from validate_distribution_oauth import validate_client_file
     problems = validate_client_file(clients[0])
     if problems:
         return [
