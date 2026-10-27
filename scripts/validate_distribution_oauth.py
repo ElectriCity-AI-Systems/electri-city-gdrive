@@ -13,6 +13,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 CLIENT_ID = re.compile(r"^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$")
@@ -43,10 +44,9 @@ def validate_client_data(data: object) -> list[str]:
         errors.append("unsupported Google token endpoint")
     redirects = client.get("redirect_uris", [])
     if not isinstance(redirects, list) or not any(
-        isinstance(value, str) and (
-            value.startswith("http://localhost")
-            or value.startswith("http://127.0.0.1")
-        )
+        isinstance(value, str)
+        and urlsplit(value).scheme == "http"
+        and urlsplit(value).hostname in {"localhost", "127.0.0.1"}
         for value in redirects
     ):
         errors.append("Desktop loopback redirect URI missing")
