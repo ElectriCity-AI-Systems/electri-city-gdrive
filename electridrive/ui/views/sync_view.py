@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from html import escape
 from pathlib import Path
-from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
