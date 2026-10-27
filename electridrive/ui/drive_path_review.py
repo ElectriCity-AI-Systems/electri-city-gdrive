@@ -249,7 +249,7 @@ class DrivePathReviewDialog(QDialog):
             self.accept()
 
     def selected_file_id(self) -> str | None:
-        if self.result() != QDialog.Accepted:
+        if self.result() != QDialog.DialogCode.Accepted:
             return None
         value = self.choice.currentData()
         allowed = {candidate.file_id for candidate in self.conflict.candidates}
