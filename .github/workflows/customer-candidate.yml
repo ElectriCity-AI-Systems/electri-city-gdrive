@@ -51,15 +51,16 @@ jobs:
           set -euo pipefail
           unset ALLOW_PLACEHOLDER_CLIENT
           bash scripts/build_deb_in_container.sh
+          version="$(python -c 'from electridrive.config import APP_VERSION; print(APP_VERSION)')"
           python scripts/verify_deb.py dist/electridrive_*_amd64.deb \
-            --expected-version 2.1.3 --max-glibc 2.35 --require-baked-client
+            --expected-version "$version" --max-glibc 2.35 --require-baked-client
           dpkg-deb --contents dist/electridrive_*_amd64.deb > "$RUNNER_TEMP/package-contents.txt"
           if grep -F 'QA-NOT-FOR-DISTRIBUTION.txt' "$RUNNER_TEMP/package-contents.txt"; then
             echo "RELEASE BLOCKED: customer artifact has QA-only marker" >&2
             exit 1
           fi
 
-      - name: Upload signed-off candidate for real Google login acceptance
+      - name: Upload validated candidate for real Google login acceptance
         uses: actions/upload-artifact@v6
         with:
           name: CUSTOMER-CANDIDATE-NEEDS-LIVE-OAUTH-ACCEPTANCE-${{ github.sha }}
