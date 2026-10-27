@@ -256,26 +256,27 @@ class DrivePathReviewDialog(QDialog):
         return value if value in allowed else None
 
 
-def show_readable_warning(parent, palette: Palette, title: str, message: str) -> None:
+def _readable_message(parent, palette: Palette, title: str,
+                      message: str, icon) -> None:
     """Avoid pale native QMessageBox surfaces inheriting near-white app text."""
     box = QMessageBox(parent)
-    box.setObjectName("SafeSyncWarning")
+    box.setObjectName("SafeSyncMessage")
     box.setWindowTitle(title)
-    box.setIcon(QMessageBox.Warning)
+    box.setIcon(icon)
     box.setTextFormat(Qt.PlainText)
     box.setText(message)
     box.setStandardButtons(QMessageBox.Ok)
     box.setStyleSheet(f"""
-        QMessageBox#SafeSyncWarning {{
+        QMessageBox#SafeSyncMessage {{
             background-color: {palette.surface};
             color: {palette.text};
         }}
-        QMessageBox#SafeSyncWarning QLabel {{
+        QMessageBox#SafeSyncMessage QLabel {{
             background: transparent;
             color: {palette.text};
             font-size: 13px;
         }}
-        QMessageBox#SafeSyncWarning QPushButton {{
+        QMessageBox#SafeSyncMessage QPushButton {{
             background-color: {palette.surface2};
             color: {palette.text};
             border: 1px solid {palette.border_strong};
@@ -285,3 +286,12 @@ def show_readable_warning(parent, palette: Palette, title: str, message: str) ->
         }}
     """)
     box.exec()
+
+
+def show_readable_warning(parent, palette: Palette, title: str, message: str) -> None:
+    _readable_message(parent, palette, title, message, QMessageBox.Warning)
+
+
+def show_readable_information(parent, palette: Palette, title: str,
+                              message: str) -> None:
+    _readable_message(parent, palette, title, message, QMessageBox.Information)
