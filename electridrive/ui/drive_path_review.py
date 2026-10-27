@@ -132,6 +132,7 @@ class DrivePathReviewDialog(QDialog):
         source = QLabel(
             f"ElectriDrive {APP_VERSION}  ·  {_DIRECTIONS.get(conflict.direction, conflict.direction)}"
         )
+        source.setObjectName("ReviewDirection")
         source.setWordWrap(True)
         layout.addWidget(source)
 
