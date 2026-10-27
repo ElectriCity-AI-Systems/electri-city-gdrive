@@ -327,7 +327,19 @@ client **and** Picker API key. Recommended build configuration:
 Set the secret using protected build infrastructure, not GitHub source commits.
 The validator checks structure and Google endpoints without displaying keys.
 A build is **not approved for publication** until a human performs a clean
-Google login + Picker + file transfer test on the exact signed/shipped package.
+Google login + Picker + file transfer test on the exact shipped package.
+
+**GitHub workflow:** `.github/workflows/customer-candidate.yml` can be triggered
+manually via **Actions → Customer release candidate → Run workflow**.
+The publisher must configure the **`customer-release` GitHub environment**
+with an **environment secret** named `ELECTRIDRIVE_APP_CLIENT_JSON`, whose
+value is the full Desktop OAuth JSON plus top-level `picker_api_key`.
+Do not put real client configuration into a Git commit or issue. The workflow
+refuses a missing/invalid secret, runs all tests, builds the customer `.deb`,
+checks it, installs it under a clean profile and publishes **only a candidate
+artifact** tagged `NEEDS-LIVE-OAUTH-ACCEPTANCE`; it does not create a public release.
+Actual Google OAuth login, Picker use and remote file transfer still require
+a manual real-account acceptance check.
 
 Only automated packaging smoke tests use `ALLOW_PLACEHOLDER_CLIENT=1`;
 their Debian packages carry `QA-NOT-FOR-DISTRIBUTION.txt`, and their artifact
