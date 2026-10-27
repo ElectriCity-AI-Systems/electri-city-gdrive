@@ -130,6 +130,9 @@ class SyncPair:
     direction: str = "two_way"  # two_way | up_only | down_only
     enabled: bool = True
     delete_policy: str = "trash"  # off | trash (never permanent in auto-sync)
+    # User-requested Google-Drive-style full backup by default. Existing saved
+    # pairs without this key inherit True on load.
+    include_all_files: bool = True
 
 
 @dataclass

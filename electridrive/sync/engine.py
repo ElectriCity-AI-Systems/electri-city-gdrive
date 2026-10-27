@@ -41,7 +41,7 @@ class UploadOnlySyncEngine:
     ):
         self.drive_client = drive_client
         self.database = database
-        self.rules = rules or SyncRules()
+        self.rules = rules if rules is not None else SyncRules.full_backup()
         self.log_callback = log_callback
         self.progress_callback = progress_callback
 
@@ -51,7 +51,12 @@ class UploadOnlySyncEngine:
             self.log_callback(message)
 
     def iter_candidate_files(self, root: Path) -> Iterable[Path]:
-        yield from scan_local_tree(root, self.rules).files
+        inventory = scan_local_tree(root, self.rules)
+        if inventory.errors and self.rules.fail_on_unsupported:
+            raise RuntimeError(
+                "Incomplete full-backup inventory: " + "; ".join(inventory.errors)
+            )
+        yield from inventory.files
 
     def should_upload(self, file_path: Path, sha256: str) -> bool:
         stat = file_path.stat()
@@ -65,7 +70,9 @@ class UploadOnlySyncEngine:
         local_root = canonical_sync_root(local_root)
 
         self._log(f"Starting upload-only sync: {local_root} -> {remote_folder}")
-        root_remote_id = self.drive_client.ensure_folder_path(remote_folder)
+        # Verify the whole local inventory before any remote mutation. In full
+        # backup mode unsupported links/special files must fail visibly, not
+        # silently yield a misleading "complete" result.
         tree = scan_local_tree(local_root, self.rules)
         files = list(tree.files)
         result.scanned_folders = len(tree.directories)
@@ -74,6 +81,9 @@ class UploadOnlySyncEngine:
             result.failed += 1
             result.errors.append(error)
             self._log(f"Local traversal failed: {error}")
+        if tree.errors and self.rules.fail_on_unsupported:
+            return result
+        root_remote_id = self.drive_client.ensure_folder_path(remote_folder)
 
         synchronized_folders: set[str] = set()
         remote_directories: dict[str, str] = {"": root_remote_id}

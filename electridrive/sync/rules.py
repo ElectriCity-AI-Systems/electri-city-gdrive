@@ -37,6 +37,24 @@ class SyncRules:
     excluded_names: set[str] = field(default_factory=lambda: set(DEFAULT_EXCLUDED_NAMES))
     excluded_suffixes: set[str] = field(default_factory=lambda: set(DEFAULT_EXCLUDED_SUFFIXES))
     max_file_size_bytes: int | None = None
+    # Full backup never silently skips unsupported entry types (symlinks,
+    # sockets, devices). They cannot be safely mirrored as ordinary Drive files.
+    fail_on_unsupported: bool = False
+
+    @classmethod
+    def full_backup(cls) -> "SyncRules":
+        """Include every regular file/dir; never silently filter dotfiles/caches.
+
+        No content-based exclusions. Descendant symlinks and special filesystem
+        entries must be reported as errors rather than traversed or omitted.
+        """
+        return cls(
+            include_hidden=True,
+            excluded_names=set(),
+            excluded_suffixes=set(),
+            max_file_size_bytes=None,
+            fail_on_unsupported=True,
+        )
 
     def is_excluded(
         self,

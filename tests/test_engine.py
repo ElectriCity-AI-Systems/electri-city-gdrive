@@ -2,6 +2,7 @@ from pathlib import Path
 
 from electridrive.storage.database import SyncDatabase
 from electridrive.sync.engine import UploadOnlySyncEngine
+from electridrive.sync.rules import SyncRules
 
 
 class FakeDrive:
@@ -43,7 +44,8 @@ def test_upload_only_sync_uploads_once_then_skips(tmp_path: Path):
     db = SyncDatabase(tmp_path / 'state.sqlite3')
     fake = FakeDrive()
     try:
-        engine = UploadOnlySyncEngine(drive_client=fake, database=db)
+        # Explicit legacy exclusions: the production default is now full backup.
+        engine = UploadOnlySyncEngine(drive_client=fake, database=db, rules=SyncRules())
         first = engine.sync_up(local, 'ElectriDrive/Test')
         assert first.uploaded == 1
         assert first.skipped == 0

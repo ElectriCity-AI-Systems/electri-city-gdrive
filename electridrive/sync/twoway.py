@@ -269,7 +269,28 @@ class TwoWaySyncEngine:
         self.client = client
         self.db = db
         self.pair = pair
-        self.rules = rules or SyncRules()
+        # Full backup is the default for configured sync pairs, including
+        # existing settings saved before include_all_files was introduced.
+        # Explicit rule objects still take precedence for expert callers.
+        if rules is not None:
+            self.rules = rules
+        elif pair.include_all_files:
+            full_rules = SyncRules.full_backup()
+            # Upload-only backs up even a pre-existing .electridrive-trash
+            # directory. In two-way/download modes the app's own recoverable
+            # trash must not be mirrored back as newly created Drive data:
+            # that would reintroduce entries just moved to Trash.
+            if pair.direction != "up_only":
+                full_rules = SyncRules(
+                    include_hidden=True,
+                    excluded_names={LOCAL_TRASH},
+                    excluded_suffixes=set(),
+                    max_file_size_bytes=None,
+                    fail_on_unsupported=True,
+                )
+            self.rules = full_rules
+        else:
+            self.rules = SyncRules()
         self.log_cb = log_cb
         self.local_root = Path(pair.local_path).expanduser()
         self.pair_id = pair_id_for(pair.local_path, pair.remote_folder)
