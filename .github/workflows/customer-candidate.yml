@@ -60,6 +60,30 @@ jobs:
             exit 1
           fi
 
+      - name: Install and launch exact customer package with clean desktop profile
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y ./dist/electridrive_*_amd64.deb
+          profile="$(mktemp -d)"
+          mkdir -p "$profile/config" "$profile/state" "$profile/cache" "$profile/runtime"
+          chmod 700 "$profile/runtime"
+          QT_QPA_PLATFORM=offscreen \
+          XDG_CONFIG_HOME="$profile/config" \
+          XDG_STATE_HOME="$profile/state" \
+          XDG_CACHE_HOME="$profile/cache" \
+          XDG_RUNTIME_DIR="$profile/runtime" \
+            /usr/bin/electridrive --doctor
+          set +e
+          QT_QPA_PLATFORM=offscreen \
+          XDG_CONFIG_HOME="$profile/config" \
+          XDG_STATE_HOME="$profile/state" \
+          XDG_CACHE_HOME="$profile/cache" \
+          XDG_RUNTIME_DIR="$profile/runtime" \
+            timeout 5 /usr/bin/electridrive
+          status=$?
+          set -e
+          test "$status" -eq 124
+
       - name: Upload validated candidate for real Google login acceptance
         uses: actions/upload-artifact@v6
         with:
