@@ -216,17 +216,66 @@ def prepare() -> None:
     print("ACHTUNG: Die Dateien liegen in einem NUR FÜR DIESEN TEST erstellten Ordner.")
 
 
+def validate_qa_settings(settings, state: dict, *, allow_enabled: bool) -> None:
+    """Fail closed if a real or unexpected sync pair entered the QA profile."""
+    if settings.scope != "file" or len(settings.sync_pairs) != 1:
+        fail("QA-Profil nicht isoliert: Scope oder Anzahl Sync-Paare falsch. Keine Synchronisation starten.")
+    pair = settings.sync_pairs[0]
+    if (
+        pair.local_path != str(SOURCE)
+        or pair.remote_folder != state["remote_folder"]
+        or pair.direction != "up_only"
+        or pair.delete_policy != "off"
+        or not pair.include_all_files
+        or (pair.enabled and not allow_enabled)
+        or any(
+            key != "duplicate.txt" or value not in state["candidate_ids"]
+            for key, value in pair.canonical_remote_ids.items()
+        )
+    ):
+        fail("QA-Profil nicht isoliert: fremdes/unerwartetes Sync-Paar oder Freigabe gefunden.")
+    if any(name in pair.local_path for name in ("/Dokumente/", "/Musik/", "/brain-")):
+        fail("QA-Synchronisation enthält einen persönlichen Ordner.")
+
+
 def launch() -> None:
     preflight()
     state = load_manifest()
     if state.get("phase") != "preflight_blocked_without_writes":
         fail("Vorbereitung nicht vollständig; kein GUI-Start.")
-    print("Öffne ausschließlich das isolierte Testprofil.")
-    print("Enable → Sync now → erst ohne Auswahl schließen.")
-    print("Dann erneut Sync now → eine künstliche Datei auswählen und speichern.")
-    print("Erst danach ein drittes Mal Sync now → Disable → Anwendung schließen.")
-    os.execv(sys.executable, [sys.executable, str(BASE / "src/app.py")])
+    from electridrive.config import get_paths, load_settings
+    settings_path = get_paths().settings_file.resolve()
+    expected_path = (QA / "profile/config/electridrive/settings.json").resolve()
+    if settings_path != expected_path or not settings_path.is_file():
+        fail("Falsches Einstellungsprofil. QA-Oberfläche wird nicht gestartet.")
+    settings = load_settings()
+    validate_qa_settings(settings, state, allow_enabled=False)
+    print("QA PROFIL BESTÄTIGT:", settings_path)
+    print("QA TESTPAAR:", settings.sync_pairs[0].local_path,
+          "→", settings.sync_pairs[0].remote_folder)
+    print("ACHTUNG: Fenstertitel muss 'QA DUPLICATE TEST ONLY' enthalten.")
+    print("Enable → Sync now → zunächst ohne Auswahl schließen.")
+    print("Dann erneut Sync now → künstliche Datei auswählen und speichern.")
+    print("Erst danach erneut Sync now → Disable → Anwendung schließen.")
 
+    # Same exact production GUI/session classes, but a visibly distinct QA
+    # entrypoint. Checking the session again catches settings changes between
+    # profile preflight and application initialization.
+    from electridrive.logging_setup import configure_logging
+    from electridrive.ui.app import create_app
+    from electridrive.ui.main_window import MainWindow
+    from electridrive.ui.session import DriveSession
+    from electridrive.ui.theme import build_qss, get_palette
+
+    configure_logging()
+    app = create_app()
+    session = DriveSession()
+    validate_qa_settings(session.settings, state, allow_enabled=False)
+    app.setStyleSheet(build_qss(get_palette(session.settings.theme)))
+    window = MainWindow(session)
+    window.setWindowTitle("ElectriDrive 2.1.3 — QA DUPLICATE TEST ONLY")
+    window.show()
+    raise SystemExit(app.exec())
 
 def verify() -> None:
     preflight()
@@ -235,11 +284,8 @@ def verify() -> None:
         fail("Test wurde nicht vollständig vorbereitet.")
     from electridrive.config import load_settings
     settings = load_settings()
-    if len(settings.sync_pairs) != 1:
-        fail("Unerwartete Zahl an Test-Synchronisationen.")
+    validate_qa_settings(settings, state, allow_enabled=False)
     pair = settings.sync_pairs[0]
-    if pair.enabled or pair.local_path != str(SOURCE) or pair.direction != "up_only":
-        fail("Testpaar ist noch aktiviert oder unerwartet verändert. Bitte 'Disable' im GUI.")
     chosen = pair.canonical_remote_ids.get("duplicate.txt")
     ids = state["candidate_ids"]
     if chosen not in ids:
