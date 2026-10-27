@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QMessageBox,
     QTextBrowser,
     QVBoxLayout,
 )
@@ -252,3 +253,34 @@ class DrivePathReviewDialog(QDialog):
         value = self.choice.currentData()
         allowed = {candidate.file_id for candidate in self.conflict.candidates}
         return value if value in allowed else None
+
+
+def show_readable_warning(parent, palette: Palette, title: str, message: str) -> None:
+    """Avoid pale native QMessageBox surfaces inheriting near-white app text."""
+    box = QMessageBox(parent)
+    box.setObjectName("SafeSyncWarning")
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Warning)
+    box.setTextFormat(Qt.PlainText)
+    box.setText(message)
+    box.setStandardButtons(QMessageBox.Ok)
+    box.setStyleSheet(f"""
+        QMessageBox#SafeSyncWarning {{
+            background-color: {palette.surface};
+            color: {palette.text};
+        }}
+        QMessageBox#SafeSyncWarning QLabel {{
+            background: transparent;
+            color: {palette.text};
+            font-size: 13px;
+        }}
+        QMessageBox#SafeSyncWarning QPushButton {{
+            background-color: {palette.surface2};
+            color: {palette.text};
+            border: 1px solid {palette.border_strong};
+            border-radius: 7px;
+            min-width: 80px;
+            padding: 8px;
+        }}
+    """)
+    box.exec()
