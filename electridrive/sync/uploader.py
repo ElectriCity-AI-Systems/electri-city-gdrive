@@ -82,6 +82,7 @@ def plan_upload(client, local_path: Path, parent_id: str, rules: SyncRules | Non
                     file_path.stat().st_size,
                 )
             )
+        return items
     if rules.fail_on_unsupported:
         raise ValueError("Selected path is not a regular file or directory")
     return items
