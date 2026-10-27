@@ -234,12 +234,14 @@ def test_duplicate_dialog_explicit_palette_readable_and_no_default_choice(qapp):
                 "Drive path: duplicate.txt"
             )
             browser = dialog.findChild(QTextBrowser, "ReviewCandidates")
-            content = browser.toHtml()
+            content = browser.toPlainText()
+            markup = browser.toHtml()
             assert "Candidate 1" in content and "Candidate 2" in content
             assert "driv…001" in content and "driv…002" in content
             assert "Open Google Drive preview" in content
-            assert "attacker.example" not in content
-            assert "drive-id-candidate-001" not in content
+            assert "drive.google.com/file/d/fixture-preview" in markup
+            assert "attacker.example" not in markup
+            assert "drive-id-candidate-001" not in markup
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -292,9 +294,9 @@ def test_gui_exposes_duplicate_candidates_and_saves_explicit_choice(
         assert "duplicate.txt" in dialog.findChild(
             QLabel, "ReviewRemotePath"
         ).text()
-        assert "Upload only" in [
-            widget.text() for widget in dialog.findChildren(QLabel)
-        ][1]
+        assert "Upload only" in dialog.findChild(
+            QLabel, "ReviewDirection"
+        ).text()
         dialog.choice.setCurrentIndex(2)
         dialog.save_choice.click()
         observed.append(dialog.selected_file_id())
