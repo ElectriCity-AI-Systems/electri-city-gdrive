@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
@@ -118,12 +120,21 @@ class LoginView(QWidget):
             self.status.setStyleSheet(f"color: {self._p.muted};")
             self.connect_btn.setEnabled(True)
         else:
-            cfg = self._session.paths.config_dir
-            self.status.setText(
-                "First-time setup: add a Google OAuth Desktop client (Drive API + Picker "
-                "API enabled). Set ELECTRIDRIVE_CLIENT_ID, or drop client JSON at "
-                f"{cfg / 'app_client.json'} (or your own credentials.json)."
-            )
+            if getattr(sys, "frozen", False):
+                # This is a publisher defect, not a task for end customers.
+                self.status.setText(
+                    "This ElectriDrive installation is missing its Google sign-in "
+                    "configuration. Please install the verified official release "
+                    "or contact ElectriDrive support. No developer setup is needed."
+                )
+            else:
+                cfg = self._session.paths.config_dir
+                self.status.setText(
+                    "Developer source checkout: configure a Google OAuth Desktop "
+                    "client to test sign-in. Set ELECTRIDRIVE_CLIENT_ID, or use "
+                    f"{cfg / 'app_client.json'} (or your own credentials.json). "
+                    "Official customer builds include this automatically."
+                )
             self.status.setStyleSheet(f"color: {self._p.warning};")
             self.connect_btn.setEnabled(False)
 
