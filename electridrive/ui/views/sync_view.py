@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -204,7 +205,7 @@ class SyncView(QWidget):
         changed = False
         for conflict in conflicts:
             dialog = DrivePathReviewDialog(conflict, self._p, self)
-            if dialog.exec() != dialog.Accepted:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 continue
             candidate_id = dialog.selected_file_id()
             if candidate_id is None:
