@@ -235,18 +235,20 @@ def _verify_qt(root: Path) -> tuple[list[str], list[str]]:
 
 
 def _verify_baked_client(root: Path) -> tuple[list[str], list[str]]:
+    # An intentionally unconfigured CI package must never be approved for
+    # distribution, even if a client JSON were accidentally added later.
+    if list(root.rglob("QA-NOT-FOR-DISTRIBUTION.txt")):
+        return ["CI QA-only package is not a customer release"], []
     clients = list(root.rglob("client_baked.json"))
-    if not clients:
-        return ["release package has no baked OAuth client configuration"], []
-    try:
-        data = json.loads(clients[0].read_text(encoding="utf-8"))
-        section = data.get("installed") or data.get("web") or data
-        client_id = section.get("client_id", "")
-    except (OSError, ValueError, AttributeError) as exc:
-        return [f"baked OAuth client configuration is invalid: {exc}"], []
-    if not client_id or "REPLACE_WITH_YOUR_" in str(client_id):
-        return ["release package has only a placeholder OAuth client"], []
-    return [], ["baked OAuth client configuration is present (values not displayed)"]
+    if len(clients) != 1:
+        return ["release package must contain exactly one baked OAuth client"], []
+    from validate_distribution_oauth import validate_client_file
+    problems = validate_client_file(clients[0])
+    if problems:
+        return [
+            "invalid customer OAuth configuration: " + "; ".join(problems)
+        ], []
+    return [], ["validated Google Desktop OAuth + Picker key (values not displayed)"]
 
 
 def verify(
