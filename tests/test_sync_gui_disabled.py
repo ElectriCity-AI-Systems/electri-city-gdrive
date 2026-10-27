@@ -224,8 +224,8 @@ def test_duplicate_dialog_explicit_palette_readable_and_no_default_choice(qapp):
             style = dialog.styleSheet().lower()
             assert f"background-color: {palette.surface.lower()}" in style
             assert f"color: {palette.text.lower()}" in style
-            assert "QDialog#DrivePathReview QLabel" in style
-            assert "QDialog#DrivePathReview QTextBrowser" in style
+            assert "qdialog#drivepathreview qlabel" in style
+            assert "qdialog#drivepathreview qtextbrowser" in style
             assert dialog.choice.currentIndex() == 0
             assert dialog.choice.currentData() is None
             assert not dialog.save_choice.isEnabled()
