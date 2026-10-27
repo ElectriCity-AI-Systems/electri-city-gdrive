@@ -35,6 +35,9 @@ if [ "$QA_ONLY" -eq 0 ]; then
   "$PY" scripts/validate_distribution_oauth.py "$BAKED"
 fi
 
+# Debian package metadata and launchers must be world-readable; do not let
+# the restrictive OAuth staging umask propagate into the package filesystem.
+umask 022
 rm -rf build dist
 "$PY" -m PyInstaller --noconfirm packaging/electridrive.spec
 rm -f "$BAKED"   # captured into the build; keep source clean
