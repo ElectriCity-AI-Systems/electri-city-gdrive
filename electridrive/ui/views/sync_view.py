@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
+from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -15,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from electridrive.config import SyncPair
+from electridrive.config import APP_VERSION, SyncPair
 from electridrive.ui import icons
 from electridrive.ui.theme import Palette
 from electridrive.ui.widgets import Card, EmptyState, ProHint
@@ -136,6 +138,7 @@ class SyncView(QWidget):
             status.setText(f"↑{report.uploaded} ↓{report.downloaded} "
                            f"⌫{report.trashed_remote + report.trashed_local} "
                            f"⚠{report.conflicts}")
+            self._review_remote_path_conflicts(pair, report.remote_path_conflicts)
             if report.failed or report.unexplained_omissions:
                 status.setText(f"Failed ({report.failed})")
                 status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
@@ -173,6 +176,10 @@ class SyncView(QWidget):
         def done(result):
             btn.setEnabled(True)
             btn.setText("Sync all")
+            for outcome in result.outcomes:
+                self._review_remote_path_conflicts(
+                    outcome.pair, outcome.report.remote_path_conflicts
+                )
             if result.failed_pairs:
                 detail = "\n".join(result.errors[:8])
                 QMessageBox.warning(
@@ -194,6 +201,105 @@ class SyncView(QWidget):
             QMessageBox.warning(self, "Sync all failed", msg)
 
         self._session.submit(work, done, fail)
+
+    @staticmethod
+    def _short_id(file_id: str) -> str:
+        return f"{file_id[:4]}…{file_id[-3:]}" if len(file_id) >= 8 else f"{file_id[:2]}…"
+
+    def _review_remote_path_conflicts(self, pair, conflicts):
+        changed = False
+        for conflict in conflicts:
+            lines = [
+                f"<b>ElectriDrive version:</b> {escape(APP_VERSION)}",
+                f"<b>Remote path:</b> {escape(conflict.remote_path)}",
+                f"<b>Operation mode:</b> {escape(_DIRS.get(conflict.direction, conflict.direction))}",
+                f"<b>Why this was flagged / execution stopped:</b> {escape(conflict.reason)}",
+                "<b>Drive candidates:</b>",
+            ]
+            for index, candidate in enumerate(conflict.candidates):
+                kind = "Folder" if candidate.is_folder else "File"
+                size = (
+                    f"{candidate.size:,} bytes"
+                    if candidate.size is not None else "size unavailable"
+                )
+                modified = candidate.modified or "modified time unavailable"
+                detail = (
+                    f"Candidate {index + 1} · {kind} · "
+                    f"ID {self._short_id(candidate.file_id)} · "
+                    f"{size} · modified {escape(modified)}"
+                )
+                link = candidate.web_view_link or ""
+                try:
+                    parsed = urlparse(link)
+                    safe_preview = (
+                        parsed.scheme == "https"
+                        and parsed.hostname in {
+                            "drive.google.com", "docs.google.com",
+                        }
+                        and parsed.username is None
+                        and parsed.password is None
+                    )
+                except ValueError:
+                    safe_preview = False
+                if safe_preview:
+                    detail += (
+                        f' · <a href="{escape(link, quote=True)}">'
+                        "Open Google Drive preview</a>"
+                    )
+                lines.append(escape(detail) if "<a " not in detail else detail)
+            if conflict.resolved:
+                lines.extend([
+                    "",
+                    "A previously reviewed canonical ID is selected. Other Drive "
+                    "objects remain untouched.",
+                ])
+            else:
+                lines.extend([
+                    "",
+                    "No file will be downloaded, overwritten, renamed, trashed, or "
+                    "deleted while this path is unresolved.",
+                ])
+            box = QMessageBox(self)
+            box.setWindowTitle("Drive path needs review")
+            box.setTextFormat(Qt.RichText)
+            box.setText("<br>".join(lines))
+            for label in box.findChildren(QLabel):
+                label.setOpenExternalLinks(True)
+            box.setStandardButtons(QMessageBox.Ok)
+            box.exec()
+
+            if conflict.resolved:
+                continue
+            if (len(conflict.candidates) < 2
+                    or any(candidate.is_folder for candidate in conflict.candidates)):
+                continue
+            choices = [
+                f"Candidate {index + 1} · File ID {self._short_id(candidate.file_id)} "
+                f"({candidate.size if candidate.size is not None else 'size unknown'} bytes)"
+                for index, candidate in enumerate(conflict.candidates)
+            ]
+            choice, ok = QInputDialog.getItem(
+                self,
+                "Choose reviewed canonical file",
+                "After previewing the candidates above, choose the Drive file ID "
+                "to use for this path. The other Drive originals will remain "
+                "untouched. No sync starts until you run it again.",
+                choices,
+                0,
+                False,
+            )
+            if ok and choice in choices:
+                candidate = conflict.candidates[choices.index(choice)]
+                pair.canonical_remote_ids[conflict.remote_path] = candidate.file_id
+                changed = True
+        if changed:
+            self._session.save()
+            QMessageBox.information(
+                self,
+                "Canonical file saved",
+                "Your reviewed Drive file ID was saved. No files were changed. "
+                "Run Sync now again to apply this explicit choice.",
+            )
 
     def _add_pair(self):
         local = QFileDialog.getExistingDirectory(self, "Choose local folder", str(Path.home()))

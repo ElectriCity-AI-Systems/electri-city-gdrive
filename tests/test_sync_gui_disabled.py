@@ -10,6 +10,7 @@ from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from electridrive.config import Settings, SyncPair
+from electridrive.sync.twoway import RemotePathCandidate, RemotePathConflict
 from electridrive.ui.theme import get_palette
 from electridrive.ui.views.sync_view import SyncView
 
@@ -187,5 +188,64 @@ def test_gui_refuses_enable_when_two_disabled_pairs_share_drive_destination(
         assert warnings == [True]
         assert not session.settings.sync_pairs[0].enabled
         assert not session.settings.sync_pairs[1].enabled
+    finally:
+        _dispose(view, qapp)
+
+
+def test_gui_exposes_duplicate_candidates_and_saves_explicit_choice(
+    qapp, tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QMessageBox, QInputDialog
+
+    pair = SyncPair(
+        str(tmp_path / "source"), "ElectriDrive/Review",
+        direction="up_only", enabled=True,
+    )
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda box: messages.append(box.text()) or QMessageBox.Ok,
+    )
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *args, **kwargs: messages.append(args[-1]),
+    )
+    monkeypatch.setattr(
+        QInputDialog, "getItem",
+        lambda *args, **kwargs: (args[3][1], True),
+    )
+    conflict = RemotePathConflict(
+        remote_path="duplicate.txt",
+        direction="up_only",
+        reason="Multiple Drive files share this path.",
+        candidates=(
+            RemotePathCandidate(
+                "drive-id-candidate-001", False, 8, "2026-01-01",
+                web_view_link="https://attacker.example/file",
+            ),
+            RemotePathCandidate("drive-id-candidate-002", False, 12, "2026-01-02"),
+        ),
+    )
+    try:
+        view._review_remote_path_conflicts(pair, [conflict])
+        display = "\n".join(messages)
+        assert "duplicate.txt" in display
+        assert "ElectriDrive version:" in display
+        assert "Upload only" in display
+        assert "Multiple Drive files share this path." in display
+        assert "drive-id-candidate-001" not in display
+        assert "drive-id-candidate-002" not in display
+        assert "driv…001" in display
+        assert "driv…002" in display
+        assert "Open Google Drive preview" not in display
+        assert pair.canonical_remote_ids == {
+            "duplicate.txt": "drive-id-candidate-002",
+        }
+        assert saved == [True]
+        assert Settings.from_dict(Settings(sync_pairs=[pair]).to_dict()).sync_pairs[
+            0
+        ].canonical_remote_ids == pair.canonical_remote_ids
     finally:
         _dispose(view, qapp)

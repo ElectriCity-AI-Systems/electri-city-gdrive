@@ -60,6 +60,28 @@ class RemoteEntry:
     size: int
     is_google_doc: bool = False
     export_mime: str | None = None
+    mime_type: str | None = None
+    web_view_link: str | None = None
+
+
+@dataclass(frozen=True)
+class RemotePathCandidate:
+    file_id: str
+    is_folder: bool
+    size: int | None
+    modified: str
+    mime_type: str | None = None
+    web_view_link: str | None = None
+
+
+@dataclass(frozen=True)
+class RemotePathConflict:
+    remote_path: str
+    direction: str
+    reason: str
+    candidates: tuple[RemotePathCandidate, ...]
+    canonical_id: str = ""
+    resolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +119,7 @@ class SyncReport:
     failed: int = 0
     unexplained_omissions: int = 0
     errors: list[str] = field(default_factory=list)
+    remote_path_conflicts: list[RemotePathConflict] = field(default_factory=list)
 
 
 def _parse_iso(iso: str) -> float:
@@ -306,6 +329,12 @@ class TwoWaySyncEngine:
         # Drive allows multiple distinct file IDs under the same folder/name.
         # Retain all IDs so upload-only can reject ambiguous write targets.
         self._duplicate_remote_ids: dict[str, set[str]] = {}
+        self._path_conflict_candidates: dict[
+            str, dict[str, RemotePathCandidate]
+        ] = {}
+        self._path_conflict_reasons: dict[str, str] = {}
+        self._dir_candidates: dict[str, RemotePathCandidate] = {}
+        self._duplicate_file_paths: set[str] = set()
         self._local_excluded = 0
         self._remote_excluded = 0
 
@@ -344,6 +373,10 @@ class TwoWaySyncEngine:
         self._remote_dirs = set()
         self._remote_scan_errors = []
         self._duplicate_remote_ids = {}
+        self._path_conflict_candidates = {}
+        self._path_conflict_reasons = {}
+        self._dir_candidates = {}
+        self._duplicate_file_paths = set()
         self._remote_excluded = 0
         entries: dict[str, RemoteEntry] = {}
         self._walk_remote(root_id, "", entries, {root_id})
@@ -372,17 +405,30 @@ class TwoWaySyncEngine:
                     if self.rules.is_excluded_relative(rel, is_file=False):
                         self._remote_excluded += 1
                         continue
+                    candidate = self._candidate_from_file(f)
                     if rel in self._dir_ids or rel in entries:
-                        self._remote_scan_errors.append(
-                            f"remote path collision at {rel!r}"
-                        )
+                        existing = self._dir_candidates.get(rel)
+                        if existing:
+                            self._record_path_collision(
+                                rel, "Multiple Drive folders share this path.",
+                                existing, candidate,
+                            )
+                        elif rel in entries:
+                            self._record_path_collision(
+                                rel, "A Drive file and folder share this path.",
+                                self._candidate_from_entry(entries[rel]), candidate,
+                            )
+                        self._remote_scan_errors.append("remote path collision")
                         continue
                     if f.id in visited:
-                        self._remote_scan_errors.append(
-                            f"remote folder cycle at {rel!r}"
+                        self._record_path_collision(
+                            rel, "Drive folder traversal contains a cycle.",
+                            candidate,
                         )
+                        self._remote_scan_errors.append("remote folder cycle")
                         continue
                     self._dir_ids[rel] = f.id
+                    self._dir_candidates[rel] = candidate
                     self._remote_dirs.add(rel)
                     visited.add(f.id)
                     self._walk_remote(f.id, rel, entries, visited)
@@ -402,6 +448,8 @@ class TwoWaySyncEngine:
                             f.size or 0,
                             is_google_doc=True,
                             export_mime=export_mime,
+                            mime_type=f.mime_type,
+                            web_view_link=f.web_view_link,
                         ),
                     )
                 elif f.md5_checksum:
@@ -413,11 +461,13 @@ class TwoWaySyncEngine:
                             f.modified_time or "",
                             f.md5_checksum,
                             f.size or 0,
+                            mime_type=f.mime_type,
+                            web_view_link=f.web_view_link,
                         ),
                     )
                 else:
                     self._remote_scan_errors.append(
-                        f"remote file has no synchronizable content fingerprint: {rel!r}"
+                        "remote file has no synchronizable content fingerprint"
                     )
             page = listing.next_page_token
             if not page:
@@ -435,9 +485,12 @@ class TwoWaySyncEngine:
         """
         existing = entries.get(candidate.rel)
         if candidate.rel in self._dir_ids:
-            self._remote_scan_errors.append(
-                f"remote file/folder path collision at {candidate.rel!r}"
+            self._record_path_collision(
+                candidate.rel, "A Drive file and folder share this path.",
+                self._dir_candidates[candidate.rel],
+                self._candidate_from_entry(candidate),
             )
+            self._remote_scan_errors.append("remote path collision")
             return
         if existing is None:
             entries[candidate.rel] = candidate
@@ -450,6 +503,12 @@ class TwoWaySyncEngine:
                 # Repeated paginated API item; one Drive object, not two.
                 entries[candidate.rel] = candidate
                 return
+            self._record_path_collision(
+                candidate.rel, "Multiple Drive files share this path.",
+                self._candidate_from_entry(existing),
+                self._candidate_from_entry(candidate),
+            )
+            self._duplicate_file_paths.add(candidate.rel)
             if self.pair.direction == "up_only":
                 # Remote-only objects will never be downloaded, updated or
                 # trashed in upload-only mode. Track ambiguous IDs rather than
@@ -463,11 +522,8 @@ class TwoWaySyncEngine:
                 if preferred == candidate.file_id:
                     entries[candidate.rel] = candidate
                 return
-            if preferred and candidate.file_id == preferred:
+            if preferred == candidate.file_id:
                 entries[candidate.rel] = candidate
-            self._remote_scan_errors.append(
-                f"duplicate remote file path at {candidate.rel!r}"
-            )
             return
 
         if preferred == existing.file_id:
@@ -479,7 +535,6 @@ class TwoWaySyncEngine:
             entries[alternate] = replace(existing, rel=alternate)
             entries[candidate.rel] = candidate
         elif existing.is_google_doc:
-            # With no history, preserve the actual binary's literal Drive name.
             alternate = self._collision_rel(existing, entries)
             entries.pop(candidate.rel)
             entries[alternate] = replace(existing, rel=alternate)
@@ -488,6 +543,62 @@ class TwoWaySyncEngine:
             alternate = self._collision_rel(candidate, entries)
             entries[alternate] = replace(candidate, rel=alternate)
 
+    @staticmethod
+    def _candidate_from_file(file) -> RemotePathCandidate:
+        return RemotePathCandidate(
+            file_id=file.id,
+            is_folder=file.is_folder,
+            size=file.size,
+            modified=file.modified_time or "",
+            mime_type=file.mime_type,
+            web_view_link=file.web_view_link,
+        )
+
+    @staticmethod
+    def _candidate_from_entry(entry: RemoteEntry) -> RemotePathCandidate:
+        return RemotePathCandidate(
+            file_id=entry.file_id,
+            is_folder=False,
+            size=entry.size,
+            modified=entry.modified,
+            mime_type=entry.mime_type,
+            web_view_link=entry.web_view_link,
+        )
+
+    def _record_path_collision(
+        self,
+        rel: str,
+        reason: str,
+        *candidates: RemotePathCandidate,
+    ) -> None:
+        self._path_conflict_reasons[rel] = reason
+        by_id = self._path_conflict_candidates.setdefault(rel, {})
+        for candidate in candidates:
+            by_id[candidate.file_id] = candidate
+
+    def _path_conflicts(self, remote: dict[str, RemoteEntry]) -> list[RemotePathConflict]:
+        conflicts = []
+        for rel, candidates in sorted(self._path_conflict_candidates.items()):
+            ids = set(candidates)
+            canonical_id = self._canonical_ids.get(rel, "")
+            resolved = (
+                len(ids) > 1
+                and all(not item.is_folder for item in candidates.values())
+                and canonical_id in ids
+                and remote.get(rel) is not None
+                and remote[rel].file_id == canonical_id
+            )
+            conflicts.append(
+                RemotePathConflict(
+                    remote_path=rel,
+                    direction=self.pair.direction,
+                    reason=self._path_conflict_reasons[rel],
+                    candidates=tuple(candidates[key] for key in sorted(candidates)),
+                    canonical_id=canonical_id if resolved else "",
+                    resolved=resolved,
+                )
+            )
+        return conflicts
     def _collision_rel(
         self, entry: RemoteEntry, entries: dict[str, RemoteEntry]
     ) -> str:
@@ -643,17 +754,30 @@ class TwoWaySyncEngine:
         self._canonical_ids = {
             rel: entry.remote_id for rel, entry in last.items() if entry.remote_id
         }
+        self._canonical_ids.update(self.pair.canonical_remote_ids)
         self._canonical_paths = {
             entry.remote_id: rel for rel, entry in last.items() if entry.remote_id
         }
         try:
             remote = self._remote_for_run()
         except Exception as exc:
+            report.remote_path_conflicts = self._path_conflicts({})
             self._report_failure(report, f"remote tree scan failed: {exc}")
             return report
         report.scanned_remote_files = len(remote)
         report.scanned_remote_folders = len(self._remote_dirs)
         report.excluded_remote = self._remote_excluded
+
+        if self.pair.direction != "up_only":
+            for rel in sorted(self._duplicate_file_paths):
+                candidates = self._path_conflict_candidates.get(rel, {})
+                preferred = self._canonical_ids.get(rel)
+                if (
+                    preferred not in candidates
+                    or remote.get(rel) is None
+                    or remote[rel].file_id != preferred
+                ):
+                    self._remote_scan_errors.append("duplicate remote file path")
 
         if self.pair.direction == "up_only":
             for rel, candidate_ids in sorted(self._duplicate_remote_ids.items()):
@@ -667,9 +791,11 @@ class TwoWaySyncEngine:
                     # No arbitrary choice between distinct Drive IDs. Even
                     # identical bytes would not establish canonical identity.
                     self._remote_scan_errors.append(
-                        f"ambiguous upload target: duplicate remote file path at {rel!r}"
+                        "ambiguous upload target: duplicate remote file path"
                     )
+        report.remote_path_conflicts = self._path_conflicts(remote)
         if self._remote_scan_errors:
+            self._remote_snapshot = None
             for error in self._remote_scan_errors:
                 self._report_failure(report, f"remote traversal incomplete: {error}")
             return report
@@ -697,7 +823,9 @@ class TwoWaySyncEngine:
                 self._report_failure(report, f"persist folder state: {exc}")
         # Action execution updates this mapping in place.  It is safe to reuse
         # only when the Changes API subsequently proves nothing remote changed.
-        self._remote_snapshot = dict(remote)
+        self._remote_snapshot = (
+            dict(remote) if not self._path_conflict_candidates else None
+        )
         return report
 
     @staticmethod
@@ -853,7 +981,9 @@ class TwoWaySyncEngine:
                     fid = self.client.upload_file(source, parent_id, Path(rel).name)
             meta = self.client.get_metadata(fid)
             remote[rel] = RemoteEntry(rel, fid, meta.modified_time or "",
-                                      meta.md5_checksum or L.md5, meta.size or L.size)
+                                      meta.md5_checksum or L.md5, meta.size or L.size,
+                                      mime_type=meta.mime_type,
+                                      web_view_link=meta.web_view_link)
             self._record(rel, local, remote)
             report.uploaded += 1
 
@@ -913,7 +1043,9 @@ class TwoWaySyncEngine:
             self.client.update_file(R.file_id, canonical)
             meta = self.client.get_metadata(R.file_id)
             remote[rel] = RemoteEntry(rel, R.file_id, meta.modified_time or "",
-                                      meta.md5_checksum or L.md5, meta.size or L.size)
+                                      meta.md5_checksum or L.md5, meta.size or L.size,
+                                      mime_type=meta.mime_type,
+                                      web_view_link=meta.web_view_link)
             st = conflict_path.stat()
             local[conflict_rel] = LocalEntry(
                 conflict_rel,
