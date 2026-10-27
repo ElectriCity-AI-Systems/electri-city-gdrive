@@ -303,7 +303,10 @@ def test_gui_exposes_duplicate_candidates_and_saves_explicit_choice(
         return dialog.result()
 
     monkeypatch.setattr(DrivePathReviewDialog, "exec", reviewed_dialog_exec)
-    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kw: None)
+    monkeypatch.setattr(
+        "electridrive.ui.views.sync_view.show_readable_information",
+        lambda *args, **kw: None,
+    )
     try:
         view._review_remote_path_conflicts(pair, [_duplicate_conflict()])
         assert observed == ["drive-id-candidate-002"]
