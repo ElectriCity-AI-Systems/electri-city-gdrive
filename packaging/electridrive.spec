@@ -20,8 +20,19 @@ for pkg in ("googleapiclient", "google.auth", "google.oauth2", "google_auth_oaut
     hiddenimports += h
 
 baked = os.path.join(ROOT, "electridrive", "google_api", "client_baked.json")
+# Direct PyInstaller invocation must not bypass the customer release gate.
+# Only the explicit CI QA-only packaging path may omit Google OAuth.
 if os.path.exists(baked):
+    import sys
+    sys.path.insert(0, ROOT)
+    from scripts.validate_distribution_oauth import validate_client_file
+    problems = validate_client_file(__import__("pathlib").Path(baked))
+    if problems:
+        raise SystemExit("RELEASE BLOCKED: invalid bundled OAuth configuration: " +
+                         "; ".join(problems))
     datas += [(baked, "electridrive/google_api")]
+elif os.environ.get("ALLOW_PLACEHOLDER_CLIENT") != "1":
+    raise SystemExit("RELEASE BLOCKED: no baked Google Desktop OAuth + Picker client.")
 
 a = Analysis(
     [os.path.join(ROOT, "app.py")],
