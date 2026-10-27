@@ -15,9 +15,13 @@ if [ -f "$CLIENT_FILE" ]; then
     --mount "type=bind,source=$CLIENT_FILE,target=/run/electridrive-app-client.json,readonly"
     --env ELECTRIDRIVE_APP_CLIENT_FILE=/run/electridrive-app-client.json
   )
-elif [ "${ALLOW_PLACEHOLDER_CLIENT:-0}" != "1" ]; then
-  echo "No OAuth client configuration found at $CLIENT_FILE." >&2
-  echo "Set ELECTRIDRIVE_APP_CLIENT_FILE or ALLOW_PLACEHOLDER_CLIENT=1 for a non-release test build." >&2
+elif [ "${ALLOW_PLACEHOLDER_CLIENT:-0}" = "1" ]; then
+  # CI exercises installation/desktop launch without actual OAuth. Pass the
+  # explicit QA-only flag into Docker; never mistake these for customer builds.
+  CLIENT_ARGS+=(--env ALLOW_PLACEHOLDER_CLIENT=1)
+else
+  echo "RELEASE BLOCKED: no OAuth client found at $CLIENT_FILE" >&2
+  echo "Supply ELECTRIDRIVE_APP_CLIENT_FILE with Google Desktop OAuth and Picker key." >&2
   exit 1
 fi
 
@@ -40,6 +44,10 @@ docker run --rm \
     (cd dist && sha256sum "electridrive_${version}_amd64.deb" > SHA256SUMS.txt)
   '
 
-echo "Release-ready artifacts:"
+if [ "${ALLOW_PLACEHOLDER_CLIENT:-0}" = "1" ] && [ ! -f "$CLIENT_FILE" ]; then
+  echo "CI QA TEST ARTIFACTS ONLY -- NOT FOR DISTRIBUTION"
+else
+  echo "Customer release candidate artifacts (live OAuth acceptance still required):"
+fi
 ls -l dist/electridrive_*_amd64.deb dist/SHA256SUMS.txt
 cat dist/SHA256SUMS.txt
