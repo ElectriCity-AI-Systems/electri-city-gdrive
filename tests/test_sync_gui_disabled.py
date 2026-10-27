@@ -7,7 +7,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTextBrowser
+
+from electridrive.ui.drive_path_review import (
+    DrivePathReviewDialog, review_style, safe_preview_url,
+    show_readable_warning,
+)
 
 from electridrive.config import Settings, SyncPair
 from electridrive.sync.twoway import RemotePathCandidate, RemotePathConflict
@@ -192,10 +197,84 @@ def test_gui_refuses_enable_when_two_disabled_pairs_share_drive_destination(
         _dispose(view, qapp)
 
 
+def _duplicate_conflict():
+    return RemotePathConflict(
+        remote_path="duplicate.txt",
+        direction="up_only",
+        reason="Multiple Drive files share this path.",
+        candidates=(
+            RemotePathCandidate(
+                "drive-id-candidate-001", False, 8, "2026-01-01",
+                web_view_link="https://attacker.example/file",
+            ),
+            RemotePathCandidate(
+                "drive-id-candidate-002", False, 12, "2026-01-02",
+                web_view_link="https://drive.google.com/file/d/fixture-preview",
+            ),
+        ),
+    )
+
+
+def test_duplicate_dialog_explicit_palette_readable_and_no_default_choice(qapp):
+    conflict = _duplicate_conflict()
+    for palette_name in ("electric_dark", "electric_light"):
+        palette = get_palette(palette_name)
+        dialog = DrivePathReviewDialog(conflict, palette)
+        try:
+            style = dialog.styleSheet().lower()
+            assert f"background-color: {palette.surface.lower()}" in style
+            assert f"color: {palette.text.lower()}" in style
+            assert "QDialog#DrivePathReview QLabel" in style
+            assert "QDialog#DrivePathReview QTextBrowser" in style
+            assert dialog.choice.currentIndex() == 0
+            assert dialog.choice.currentData() is None
+            assert not dialog.save_choice.isEnabled()
+            assert dialog.selected_file_id() is None
+            assert dialog.findChild(QLabel, "ReviewRemotePath").text() == (
+                "Drive path: duplicate.txt"
+            )
+            browser = dialog.findChild(QTextBrowser, "ReviewCandidates")
+            content = browser.toHtml()
+            assert "Candidate 1" in content and "Candidate 2" in content
+            assert "driv…001" in content and "driv…002" in content
+            assert "Open Google Drive preview" in content
+            assert "attacker.example" not in content
+            assert "drive-id-candidate-001" not in content
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            qapp.processEvents()
+
+
+def test_duplicate_dialog_requires_reviewed_selection_and_can_cancel(qapp):
+    dialog = DrivePathReviewDialog(_duplicate_conflict(), get_palette("electric_dark"))
+    try:
+        dialog.save_choice.click()  # disabled: no implicit target
+        assert dialog.selected_file_id() is None
+        dialog.choice.setCurrentIndex(1)
+        assert dialog.save_choice.isEnabled()
+        dialog.reject()
+        assert dialog.selected_file_id() is None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+    dialog = DrivePathReviewDialog(_duplicate_conflict(), get_palette("electric_dark"))
+    try:
+        dialog.choice.setCurrentIndex(2)
+        dialog.save_choice.click()
+        assert dialog.selected_file_id() == "drive-id-candidate-002"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
 def test_gui_exposes_duplicate_candidates_and_saves_explicit_choice(
     qapp, tmp_path, monkeypatch,
 ):
-    from PySide6.QtWidgets import QMessageBox, QInputDialog
+    from PySide6.QtWidgets import QMessageBox
 
     pair = SyncPair(
         str(tmp_path / "source"), "ElectriDrive/Review",
@@ -205,47 +284,105 @@ def test_gui_exposes_duplicate_candidates_and_saves_explicit_choice(
     saved = []
     session.save = lambda: saved.append(True)
     view = SyncView(session, get_palette("electric_dark"))
-    messages = []
-    monkeypatch.setattr(
-        QMessageBox, "exec", lambda box: messages.append(box.text()) or QMessageBox.Ok,
-    )
-    monkeypatch.setattr(
-        QMessageBox, "information", lambda *args, **kwargs: messages.append(args[-1]),
-    )
-    monkeypatch.setattr(
-        QInputDialog, "getItem",
-        lambda *args, **kwargs: (args[3][1], True),
-    )
-    conflict = RemotePathConflict(
-        remote_path="duplicate.txt",
-        direction="up_only",
-        reason="Multiple Drive files share this path.",
-        candidates=(
-            RemotePathCandidate(
-                "drive-id-candidate-001", False, 8, "2026-01-01",
-                web_view_link="https://attacker.example/file",
-            ),
-            RemotePathCandidate("drive-id-candidate-002", False, 12, "2026-01-02"),
-        ),
-    )
+    observed = []
+
+    def reviewed_dialog_exec(dialog):
+        assert dialog.choice.currentIndex() == 0
+        assert not dialog.save_choice.isEnabled()
+        assert "duplicate.txt" in dialog.findChild(
+            QLabel, "ReviewRemotePath"
+        ).text()
+        assert "Upload only" in [
+            widget.text() for widget in dialog.findChildren(QLabel)
+        ][1]
+        dialog.choice.setCurrentIndex(2)
+        dialog.save_choice.click()
+        observed.append(dialog.selected_file_id())
+        return dialog.result()
+
+    monkeypatch.setattr(DrivePathReviewDialog, "exec", reviewed_dialog_exec)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kw: None)
     try:
-        view._review_remote_path_conflicts(pair, [conflict])
-        display = "\n".join(messages)
-        assert "duplicate.txt" in display
-        assert "ElectriDrive version:" in display
-        assert "Upload only" in display
-        assert "Multiple Drive files share this path." in display
-        assert "drive-id-candidate-001" not in display
-        assert "drive-id-candidate-002" not in display
-        assert "driv…001" in display
-        assert "driv…002" in display
-        assert "Open Google Drive preview" not in display
+        view._review_remote_path_conflicts(pair, [_duplicate_conflict()])
+        assert observed == ["drive-id-candidate-002"]
         assert pair.canonical_remote_ids == {
             "duplicate.txt": "drive-id-candidate-002",
         }
         assert saved == [True]
+        assert session.submitted == []  # saving never uploads or downloads
         assert Settings.from_dict(Settings(sync_pairs=[pair]).to_dict()).sync_pairs[
             0
         ].canonical_remote_ids == pair.canonical_remote_ids
     finally:
         _dispose(view, qapp)
+
+
+def test_duplicate_dialog_cancel_never_saves_or_starts_sync(qapp, tmp_path, monkeypatch):
+    pair = SyncPair(str(tmp_path / "source"), "ElectriDrive/Review",
+                    direction="up_only", enabled=True)
+    session = FakeSession([pair])
+    view = SyncView(session, get_palette("electric_dark"))
+
+    def cancel_dialog(dialog):
+        dialog.reject()
+        return dialog.result()
+
+    monkeypatch.setattr(DrivePathReviewDialog, "exec", cancel_dialog)
+    try:
+        view._review_remote_path_conflicts(pair, [_duplicate_conflict()])
+        assert pair.canonical_remote_ids == {}
+        assert session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
+@pytest.mark.parametrize("url", [
+    "https://drive.google.com.evil.example/file/1",
+    "https://drive.google.com@evil.example/1",
+    "https://baduser@drive.google.com/1",
+    "https://drive.google.com:444/file/1",
+    "http://drive.google.com/file/1",
+    "javascript:alert(1)",
+    "https://docs.google.com.evil.example/d/1",
+])
+def test_google_preview_rejects_untrusted_urls(url):
+    assert safe_preview_url(url) is None
+
+
+def test_google_preview_allows_known_https_origin():
+    assert safe_preview_url("https://drive.google.com/file/d/test") is not None
+
+
+def test_warning_dialog_is_legible_against_explicit_dark_background(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    checked = []
+
+    def inspect(box):
+        assert "Sync incomplete" == box.windowTitle()
+        assert box.text() == "Unresolved duplicate."
+        style = box.styleSheet().lower()
+        assert "background-color: #161b22" in style
+        assert "color: #e6edf3" in style
+        checked.append(True)
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec", inspect)
+    show_readable_warning(None, get_palette("electric_dark"),
+                          "Sync incomplete", "Unresolved duplicate.")
+    assert checked == [True]
+
+
+def test_reviewer_contrast_exceeds_accessibility_minimum():
+    def luminance(color):
+        channels = [int(color[index:index+2], 16) / 255
+                    for index in (1, 3, 5)]
+        rgb = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+               for v in channels]
+        return sum(v * k for v, k in zip(rgb, (0.2126, 0.7152, 0.0722)))
+
+    for name in ("electric_dark", "electric_light"):
+        palette = get_palette(name)
+        bg, text = luminance(palette.surface), luminance(palette.text)
+        ratio = (max(bg, text) + 0.05) / (min(bg, text) + 0.05)
+        assert ratio >= 4.5, (name, ratio)
