@@ -139,8 +139,10 @@ class SyncView(QWidget):
             status.setText(f"↑{report.uploaded} ↓{report.downloaded} "
                            f"⌫{report.trashed_remote + report.trashed_local} "
                            f"⚠{report.conflicts}")
-            self._review_remote_path_conflicts(pair, report.remote_path_conflicts)
             if report.failed or report.unexplained_omissions:
+                # Remote-only duplicate names are harmless in upload-only mode.
+                # Do not interrupt a successful sync just to review them.
+                self._review_remote_path_conflicts(pair, report.remote_path_conflicts)
                 status.setText(f"Failed ({report.failed})")
                 status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
                 show_readable_warning(
@@ -177,9 +179,10 @@ class SyncView(QWidget):
             btn.setEnabled(True)
             btn.setText("Sync all")
             for outcome in result.outcomes:
-                self._review_remote_path_conflicts(
-                    outcome.pair, outcome.report.remote_path_conflicts
-                )
+                if outcome.report.failed or outcome.report.unexplained_omissions:
+                    self._review_remote_path_conflicts(
+                        outcome.pair, outcome.report.remote_path_conflicts
+                    )
             if result.failed_pairs:
                 detail = "\n".join(result.errors[:8])
                 show_readable_warning(
@@ -204,6 +207,10 @@ class SyncView(QWidget):
         """One accessible dialog per conflict; nothing is selected implicitly."""
         changed = False
         for conflict in conflicts:
+            # A previously reviewed canonical ID must not ask the owner
+            # again on every sync attempt.
+            if conflict.resolved:
+                continue
             dialog = DrivePathReviewDialog(conflict, self._p, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 continue
