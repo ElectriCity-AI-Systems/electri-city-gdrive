@@ -36,5 +36,10 @@ without deleting the other item, and complete a full-file backup including a
 hidden file. Record results for that exact artifact. Automated CI or prior
 Drive acceptance of another build is not a substitute. Do not publish a
 release or change versions until the owner approves the exact-binary acceptance.
+The workflow pins and SHA256-verifies both the versioned AppImage build tool
+(1.9.1) and its versioned runtime (20251108) against upstream asset digests.
+If pinned artifacts become unavailable or a checksum changes, the build stops
+rather than downloading or executing an unverified replacement.
+
 The workflow does not sign packages; if publisher signing is required, the owner
 must provision the signing process before distribution.
