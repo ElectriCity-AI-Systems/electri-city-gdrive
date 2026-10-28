@@ -19,15 +19,27 @@ BUILD_CHANNEL="${ELECTRIDRIVE_BUILD_CHANNEL:-CUSTOMER-CANDIDATE}"
 BAKED=electridrive/google_api/client_baked.json
 CHANNEL_FILE=electridrive/build_channel.txt
 BAKED_CLIENT=0
-trap 'rm -f "$BAKED" "$CHANNEL_FILE"' EXIT
-rm -f "$BAKED"
+BAKED_CREATED=0
+CHANNEL_CREATED=0
+cleanup() {
+  [ "$BAKED_CREATED" -eq 0 ] || rm -f "$BAKED"
+  [ "$CHANNEL_CREATED" -eq 0 ] || rm -f "$CHANNEL_FILE"
+}
+trap cleanup EXIT
+if [ -e "$BAKED" ] || [ -L "$BAKED" ] || [ -e "$CHANNEL_FILE" ] || [ -L "$CHANNEL_FILE" ]; then
+  echo "Refusing to build with pre-existing generated OAuth or channel files." >&2
+  exit 1
+fi
 if [ "$BUILD_CHANNEL" = "CI-QA" ]; then
+  CHANNEL_CREATED=1
   printf '%s\n' "$BUILD_CHANNEL" > "$CHANNEL_FILE"
 elif [ "$BUILD_CHANNEL" = "CUSTOMER-CANDIDATE" ]; then
   if { [ -n "${ELECTRIDRIVE_CLIENT_ID:-}" ] && [ -n "${ELECTRIDRIVE_CLIENT_SECRET:-}" ]; } \
       || { [ -n "${ELECTRIDRIVE_APP_CLIENT_FILE:-}" ] && [ -f "$ELECTRIDRIVE_APP_CLIENT_FILE" ]; }; then
     "$PY" scripts/bake_client.py
+    BAKED_CREATED=1
     BAKED_CLIENT=1
+    CHANNEL_CREATED=1
     printf '%s\n' "$BUILD_CHANNEL" > "$CHANNEL_FILE"
   else
     echo "Customer candidate build requires a publisher-provided OAuth Desktop client and Picker key." >&2
@@ -40,7 +52,6 @@ fi
 
 rm -rf build dist
 "$PY" -m PyInstaller --noconfirm packaging/electridrive.spec
-rm -f "$BAKED"   # captured into the build; keep source tree clean
 
 # ---- AppImage ----
 APPDIR=dist/ElectriDrive.AppDir

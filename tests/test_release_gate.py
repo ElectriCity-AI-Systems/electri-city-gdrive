@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -28,6 +29,42 @@ def _client() -> dict:
 
 def test_accepts_publisher_desktop_oauth_and_picker_config():
     validate_customer_config(_client())
+
+
+def test_baker_refuses_to_replace_existing_baked_oauth_file(
+    monkeypatch, tmp_path: Path, capsys,
+):
+    from scripts import bake_client
+
+    output = tmp_path / "client_baked.json"
+    original = b'{"installed":{"client_id":"kept.apps.googleusercontent.com"}}'
+    output.write_bytes(original)
+    monkeypatch.setattr(bake_client, "OUT", output)
+
+    assert bake_client.main() == 1
+    assert output.read_bytes() == original
+    assert "Refusing to overwrite" in capsys.readouterr().err
+
+
+def test_baker_writes_private_validated_config_without_logging_values(
+    monkeypatch, tmp_path: Path, capsys,
+):
+    from scripts import bake_client
+
+    client_file = tmp_path / "publisher.json"
+    client_file.write_text(json.dumps(_client()), encoding="utf-8")
+    output = tmp_path / "client_baked.json"
+    monkeypatch.setattr(bake_client, "OUT", output)
+    monkeypatch.setenv("ELECTRIDRIVE_APP_CLIENT_FILE", str(client_file))
+    monkeypatch.delenv("ELECTRIDRIVE_PICKER_API_KEY", raising=False)
+
+    assert bake_client.main() == 0
+    result = capsys.readouterr()
+
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert json.loads(output.read_text(encoding="utf-8")) == _client()
+    assert "publisher-secret" not in result.out + result.err
+    assert "AIza" not in result.out + result.err
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,9 @@ OUT = Path(__file__).resolve().parents[1] / "electridrive" / "google_api" / "cli
 
 
 def main() -> int:
+    if OUT.exists() or OUT.is_symlink():
+        print("Refusing to overwrite an existing baked OAuth configuration.", file=sys.stderr)
+        return 1
     client_file = os.environ.get("ELECTRIDRIVE_APP_CLIENT_FILE")
     if client_file:
         try:
@@ -57,7 +60,17 @@ def main() -> int:
     except ValueError as exc:
         print(f"Customer OAuth configuration rejected: {exc}", file=sys.stderr)
         return 1
-    OUT.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    created = False
+    try:
+        with OUT.open("x", encoding="utf-8") as stream:
+            created = True
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(data, stream, indent=2)
+    except OSError:
+        if created:
+            OUT.unlink(missing_ok=True)
+        print("Validated OAuth configuration could not be written.", file=sys.stderr)
+        return 1
     print("Baked validated customer OAuth and Picker configuration.")
     return 0
 
