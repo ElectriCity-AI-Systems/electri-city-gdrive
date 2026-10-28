@@ -4,16 +4,46 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY="${PY:-.venv/bin/python}"
+BUILD_CHANNEL="${ELECTRIDRIVE_BUILD_CHANNEL:-CUSTOMER-CANDIDATE}"
 
 "$PY" -c 'import PyInstaller' >/dev/null || {
   echo "PyInstaller is missing; install packaging/requirements-release.txt first." >&2
   exit 1
 }
-[ -n "${ELECTRIDRIVE_CLIENT_ID:-}" ] && "$PY" scripts/bake_client.py || true
+BAKED=electridrive/google_api/client_baked.json
+CHANNEL_FILE=electridrive/build_channel.txt
+BAKED_CREATED=0
+CHANNEL_CREATED=0
+cleanup() {
+  [ "$BAKED_CREATED" -eq 0 ] || rm -f "$BAKED"
+  [ "$CHANNEL_CREATED" -eq 0 ] || rm -f "$CHANNEL_FILE"
+}
+trap cleanup EXIT
+if [ -e "$BAKED" ] || [ -L "$BAKED" ] || [ -e "$CHANNEL_FILE" ] || [ -L "$CHANNEL_FILE" ]; then
+  echo "Refusing to build with pre-existing generated OAuth or channel files." >&2
+  exit 1
+fi
+if [ "$BUILD_CHANNEL" = "CI-QA" ]; then
+  CHANNEL_CREATED=1
+  printf '%s\n' "$BUILD_CHANNEL" > "$CHANNEL_FILE"
+elif [ "$BUILD_CHANNEL" = "CUSTOMER-CANDIDATE" ]; then
+  if { [ -n "${ELECTRIDRIVE_CLIENT_ID:-}" ] && [ -n "${ELECTRIDRIVE_CLIENT_SECRET:-}" ]; } \
+      || { [ -n "${ELECTRIDRIVE_APP_CLIENT_FILE:-}" ] && [ -f "$ELECTRIDRIVE_APP_CLIENT_FILE" ]; }; then
+    "$PY" scripts/bake_client.py
+    BAKED_CREATED=1
+    CHANNEL_CREATED=1
+    printf '%s\n' "$BUILD_CHANNEL" > "$CHANNEL_FILE"
+  else
+    echo "Customer candidate build requires a publisher-provided OAuth Desktop client and Picker key." >&2
+    exit 1
+  fi
+else
+  echo "Unsupported build channel: $BUILD_CHANNEL" >&2
+  exit 1
+fi
 
 rm -rf build dist
 "$PY" -m PyInstaller --noconfirm packaging/electridrive.spec
-rm -f electridrive/google_api/client_baked.json   # captured into the build; keep source clean
 
 APPDIR=dist/ElectriDrive.AppDir
 rm -rf "$APPDIR"; mkdir -p "$APPDIR/usr/bin"
@@ -36,12 +66,11 @@ EOF
 chmod +x "$APPDIR/AppRun"
 
 TOOL=build/appimagetool-x86_64.AppImage
-if [ ! -x "$TOOL" ]; then
-  mkdir -p build
-  curl -fsSL -o "$TOOL" \
-    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-  chmod +x "$TOOL"
-fi
-# --appimage-extract-and-run avoids needing FUSE to RUN appimagetool itself.
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" dist/ElectriDrive-x86_64.AppImage
-echo "Built: dist/ElectriDrive-x86_64.AppImage"
+RUNTIME=build/runtime-x86_64
+bash scripts/get_pinned_appimagetool.sh
+
+APPIMAGE=dist/ElectriDrive-x86_64.AppImage
+[ "$BUILD_CHANNEL" = "CI-QA" ] && APPIMAGE=dist/ElectriDrive-CI-QA-x86_64.AppImage
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" "$APPDIR" "$APPIMAGE"
+"$PY" scripts/verify_customer_artifact.py "$APPIMAGE" --expected-channel "$BUILD_CHANNEL"
+echo "Built: $APPIMAGE"

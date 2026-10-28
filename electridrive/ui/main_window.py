@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from electridrive.config import APP_TAGLINE
+from electridrive.build_channel import window_title
 from electridrive.ui import icons
 from electridrive.ui.session import DriveSession
 from electridrive.ui.theme import build_qss, get_palette
@@ -54,7 +55,7 @@ class MainWindow(QMainWindow):
         self.views: dict[str, QWidget] = {}
         self.nav_buttons: dict[str, NavButton] = {}
 
-        self.setWindowTitle("ElectriDrive")
+        self.setWindowTitle(window_title())
         self.setMinimumSize(1040, 680)
         self.setWindowIcon(icons.icon("bolt", self.palette_.accent, 64))
 

@@ -76,7 +76,7 @@ jobs:
 
       - name: Build and verify Debian package on the GLIBC 2.35 baseline
         env:
-          ALLOW_PLACEHOLDER_CLIENT: "1"
+          ELECTRIDRIVE_BUILD_CHANNEL: CI-QA
         run: bash scripts/build_deb_in_container.sh
 
       - name: Install and launch the built package from terminal and desktop entry
@@ -131,6 +131,6 @@ jobs:
       - name: Upload verified Debian package
         uses: actions/upload-artifact@v6
         with:
-          name: electridrive-debian-${{ matrix.os }}-${{ github.sha }}
+          name: electridrive-CI-QA-debian-${{ matrix.os }}-${{ github.sha }}
           path: dist/electridrive_*_amd64.deb
           if-no-files-found: error
