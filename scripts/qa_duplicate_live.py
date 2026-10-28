@@ -339,11 +339,105 @@ def verify() -> None:
     print("Persönliche Sync-Paare nie geladen/aktiviert: JA")
 
 
+def finish() -> None:
+    """Owner-selected, exactly-one-pair live upload, then independent verification.
+
+    Never attempts to resolve ambiguous IDs automatically. Preconditions protect
+    both synthetic Drive originals until the exact reviewed target is known.
+    """
+    preflight()
+    state = load_manifest()
+    if state.get("phase") != "preflight_blocked_without_writes":
+        fail("QA-Test ist nicht in der vorgesehenen Phase. Kein Upload.")
+    from electridrive.config import get_paths, load_settings
+    from electridrive.sync.rules import SyncRules
+    from electridrive.sync.tree import scan_local_tree
+    from electridrive.storage.database import SyncDatabase
+    from electridrive.sync.twoway import TwoWaySyncEngine
+
+    paths = get_paths()
+    expected_settings = QA / "profile/config/electridrive/settings.json"
+    if paths.settings_file.resolve() != expected_settings.resolve():
+        fail("Falsches QA-Konfigurationsverzeichnis. Kein Upload.")
+    settings = load_settings()
+    validate_qa_settings(settings, state, allow_enabled=False)
+    pair = settings.sync_pairs[0]
+    selected = pair.canonical_remote_ids.get("duplicate.txt")
+    ids = state.get("candidate_ids", [])
+    if len(ids) != 2 or len(set(ids)) != 2 or selected not in ids:
+        fail("Keine eindeutige, vom Nutzer bestätigte QA-Datei-ID. Kein Upload.")
+
+    local = scan_local_tree(SOURCE, SyncRules.full_backup())
+    expected_files = {"duplicate.txt", ".env"}
+    if (
+        local.errors or local.excluded
+        or local.relative_files != expected_files
+        or any(
+            digest((SOURCE / name).read_bytes())
+            != state.get("local_sha256", {}).get(name)
+            for name in expected_files
+        )
+    ):
+        fail("QA-Quelldateien fehlen, sind verändert oder nicht vollständig. Kein Upload.")
+
+    g = client()
+    # Verify the root destination itself; a second folder with the same name
+    # must not be chosen by ensure_folder_path or touched by our test.
+    roots = [
+        item for item in list_children(g, "root")
+        if item.name == state["remote_folder"] and item.is_folder
+    ]
+    if len(roots) != 1 or roots[0].id != state["remote_folder_id"]:
+        fail("QA-Cloud-Zielordner ist nicht mehr eindeutig. Kein Upload.")
+    contents = list_children(g, state["remote_folder_id"])
+    if (
+        len(contents) != 2
+        or any(item.name != "duplicate.txt" or item.is_folder for item in contents)
+        or {item.id for item in contents} != set(ids)
+    ):
+        fail("QA-Cloud-Ordner wurde seit der Vorbereitung verändert. Kein Upload.")
+    for index, remote_id in enumerate(ids):
+        original = (QA / f"seed-{'AB'[index]}.txt").read_bytes()
+        entry = next(item for item in contents if item.id == remote_id)
+        if digest(original) != state.get("candidate_sha256", {}).get(remote_id):
+            fail("QA-Testmanifest stimmt nicht mehr mit Original überein. Kein Upload.")
+        if entry.md5_checksum != md5(original):
+            fail("QA-Cloud-Datei wurde bereits verändert. Kein erneuter Upload.")
+
+    print("=== SICHERER QA-ABSCHLUSS-LAUF ===", flush=True)
+    print("Ein Testpaar, nur Upload, Löschungen aus, beide Cloud-Originale geprüft.")
+    print("Bewusst ausgewählter QA-Kandidat:", ids.index(selected) + 1, flush=True)
+    db = SyncDatabase(paths.database_file)
+    try:
+        report = TwoWaySyncEngine(g, db, pair).run()
+    finally:
+        db.close()
+
+    print(
+        "Synchronisationsbericht:",
+        "Uploads", report.uploaded,
+        "| Downloads", report.downloaded,
+        "| Löschungen", report.trashed_remote + report.trashed_local,
+        "| Fehler", report.failed,
+        "| Fehlende Elemente", report.unexplained_omissions,
+        flush=True,
+    )
+    if (
+        report.failed or report.unexplained_omissions
+        or report.uploaded != 2 or report.downloaded
+        or report.trashed_remote or report.trashed_local
+    ):
+        for error in report.errors:
+            print("QA-Synchronisationsfehler:", error, file=sys.stderr)
+        fail("QA-Lauf nicht vollständig erfolgreich; keine automatische Wiederholung.")
+    verify()
+
+
 def main() -> None:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"prepare", "launch", "verify"}:
-        fail("Aufruf: python <Skriptdatei> prepare | launch | verify")
+    if len(sys.argv) != 2 or sys.argv[1] not in {"prepare", "launch", "verify", "finish"}:
+        fail("Aufruf: python <Skriptdatei> prepare | launch | verify | finish")
     os.umask(0o077)
-    {"prepare": prepare, "launch": launch, "verify": verify}[sys.argv[1]]()
+    {"prepare": prepare, "launch": launch, "verify": verify, "finish": finish}[sys.argv[1]]()
 
 
 if __name__ == "__main__":
