@@ -71,7 +71,7 @@ def test_qa_profile_rejects_tampered_pair(synthetic_qa, field):
 def test_qa_profile_rejects_enabled_pair_on_initial_launch(synthetic_qa):
     state, pair = synthetic_qa
     pair.enabled = True
-    with pytest.raises(SystemExit, match="QA-Profil nicht isoliert"):
+    with pytest.raises(SystemExit, match="QA-Testpaar ist noch aktiviert"):
         qa.validate_qa_settings(Settings(scope="file", sync_pairs=[pair]),
                                 state, allow_enabled=False)
 
@@ -79,7 +79,7 @@ def test_qa_profile_rejects_enabled_pair_on_initial_launch(synthetic_qa):
 def test_qa_profile_rejects_unknown_canonical_id(synthetic_qa):
     state, pair = synthetic_qa
     pair.canonical_remote_ids["duplicate.txt"] = "some-other-real-drive-id"
-    with pytest.raises(SystemExit, match="QA-Profil nicht isoliert"):
+    with pytest.raises(SystemExit, match="nicht geprüfte Drive-Datei-ID"):
         qa.validate_qa_settings(Settings(scope="file", sync_pairs=[pair]),
                                 state, allow_enabled=False)
 
