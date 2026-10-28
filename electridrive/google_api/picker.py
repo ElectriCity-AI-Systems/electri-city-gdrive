@@ -135,7 +135,8 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
     flow = Flow.from_client_config(
         app_client.client_config(), scopes=[DEFAULT_SCOPE], autogenerate_code_verifier=True
     )
-    flow.redirect_uri = f"http://localhost:{port}/"
+    # Match the actual IPv4-only listener: localhost may resolve to ::1 first.
+    flow.redirect_uri = f"http://127.0.0.1:{port}/"
     auth_url, state = flow.authorization_url(**picker_auth_params(allow_folders))
     if not isinstance(state, str) or not state:
         httpd.server_close()
