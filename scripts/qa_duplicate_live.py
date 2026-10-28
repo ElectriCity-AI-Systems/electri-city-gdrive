@@ -227,13 +227,19 @@ def validate_qa_settings(settings, state: dict, *, allow_enabled: bool) -> None:
         or pair.direction != "up_only"
         or pair.delete_policy != "off"
         or not pair.include_all_files
-        or (pair.enabled and not allow_enabled)
-        or any(
-            key != "duplicate.txt" or value not in state["candidate_ids"]
-            for key, value in pair.canonical_remote_ids.items()
-        )
     ):
-        fail("QA-Profil nicht isoliert: fremdes/unerwartetes Sync-Paar oder Freigabe gefunden.")
+        fail("QA-Profil nicht isoliert: fremdes oder unerwartetes Sync-Paar.")
+    if any(
+        key != "duplicate.txt" or value not in state["candidate_ids"]
+        for key, value in pair.canonical_remote_ids.items()
+    ):
+        fail("QA-Profil enthält eine nicht geprüfte Drive-Datei-ID. Keine Änderungen.")
+    if pair.enabled and not allow_enabled:
+        fail(
+            "QA-Testpaar ist noch aktiviert. In ElectriDrive ausschließlich "
+            "dieses Paar mit Disable deaktivieren, Fenster schließen und "
+            "verify erneut ausführen."
+        )
     if any(name in pair.local_path for name in ("/Dokumente/", "/Musik/", "/brain-")):
         fail("QA-Synchronisation enthält einen persönlichen Ordner.")
 
