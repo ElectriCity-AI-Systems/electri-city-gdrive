@@ -66,15 +66,11 @@ EOF
 chmod +x "$APPDIR/AppRun"
 
 TOOL=build/appimagetool-x86_64.AppImage
-if [ ! -x "$TOOL" ]; then
-  mkdir -p build
-  curl -fsSL -o "$TOOL" \
-    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-  chmod +x "$TOOL"
-fi
-# --appimage-extract-and-run avoids needing FUSE to RUN appimagetool itself.
+RUNTIME=build/runtime-x86_64
+bash scripts/get_pinned_appimagetool.sh
+
 APPIMAGE=dist/ElectriDrive-x86_64.AppImage
 [ "$BUILD_CHANNEL" = "CI-QA" ] && APPIMAGE=dist/ElectriDrive-CI-QA-x86_64.AppImage
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" "$APPIMAGE"
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" "$APPDIR" "$APPIMAGE"
 "$PY" scripts/verify_customer_artifact.py "$APPIMAGE" --expected-channel "$BUILD_CHANNEL"
 echo "Built: $APPIMAGE"
