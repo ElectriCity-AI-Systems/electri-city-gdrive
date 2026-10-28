@@ -1,7 +1,6 @@
 """Offline fail-closed tests of immutable AppImage build dependencies."""
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -43,7 +42,7 @@ def test_pinned_appimage_build_script_has_versioned_dependencies():
     assert 'RUNTIME_VERSION="20251108"' in body
     assert "releases/download/continuous/" not in body
     assert "sha256sum --check --status" in body
-    assert "APPIMAGETOOL" not in body or "TOOL_SHA256" in body
+    assert "TOOL_SHA256" in body and "RUNTIME_SHA256" in body
     for name in ("scripts/build_release.sh", "scripts/build_appimage.sh"):
         caller = (Path(__file__).resolve().parents[1] / name).read_text()
         assert "bash scripts/get_pinned_appimagetool.sh" in caller
