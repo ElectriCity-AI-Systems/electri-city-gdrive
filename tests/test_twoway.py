@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from electridrive.config import SyncPair
+from electridrive.config import Settings, SyncPair
 from electridrive.storage.database import SyncDatabase
 from electridrive.sync.twoway import (
     ActionKind,
@@ -509,6 +509,9 @@ def test_up_only_ignores_unrelated_remote_duplicates_without_touching_them(
     try:
         report = TwoWaySyncEngine(fake, db, pair).run()
         assert report.failed == 0 and report.uploaded == 1
+        assert len(report.remote_path_conflicts) == 1
+        assert report.remote_path_conflicts[0].remote_path == "remote-only.txt"
+        assert not report.remote_path_conflicts[0].resolved
         assert report.downloaded == report.trashed_local == report.trashed_remote == 0
         assert fake.nodes[first]["content"] == b"old-a"
         assert fake.nodes[second]["content"] == b"old-b"
@@ -595,23 +598,136 @@ def test_up_only_rechecks_cached_duplicate_paths_when_local_file_appears(
         db.close()
 
 
-def test_two_way_keeps_fail_closed_on_identical_remote_paths(tmp_path: Path):
+def test_two_way_keeps_fail_closed_on_identical_remote_paths(
+    tmp_path: Path, caplog,
+):
     root = tmp_path / "sync"
     root.mkdir()
     fake = FakeDrive()
     folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
-    fake.add_file("same.txt", b"a", parent=folder)
-    fake.add_file("same.txt", b"b", parent=folder)
+    first = fake.add_file("same.txt", b"a", parent=folder)
+    second = fake.add_file("same.txt", b"b", parent=folder)
     db = SyncDatabase(tmp_path / "state.sqlite3")
     try:
         report = TwoWaySyncEngine(fake, db, _pair(root)).run()
         assert report.failed >= 1
         assert any("duplicate remote file path" in e for e in report.errors)
+        assert len(report.remote_path_conflicts) == 1
+        conflict = report.remote_path_conflicts[0]
+        assert conflict.remote_path == "same.txt"
+        assert conflict.direction == "two_way"
+        assert {candidate.file_id for candidate in conflict.candidates} == {
+            first, second,
+        }
+        assert not conflict.resolved
+        assert all("same.txt" not in error for error in report.errors)
+        assert "same.txt" not in caplog.text
         assert not fake.uploads and not fake.updates
         assert not (root / "same.txt").exists()
     finally:
         db.close()
 
+
+def test_duplicate_candidates_split_across_drive_pages_remain_blocked(tmp_path: Path):
+    from electridrive.google_api.client import FileListing
+
+    class PagedFakeDrive(FakeDrive):
+        page_parent = ""
+
+        def list_folder(self, parent_id="root", page_token=None):
+            listing = super().list_folder(parent_id, page_token)
+            if parent_id != self.page_parent:
+                return listing
+            if page_token is None:
+                return FileListing(listing.files[:1], "next")
+            return FileListing(listing.files[1:], None)
+
+    root = tmp_path / "sync"
+    root.mkdir()
+    fake = PagedFakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    fake.page_parent = folder
+    first = fake.add_file("same.txt", b"first", parent=folder)
+    second = fake.add_file("same.txt", b"second", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        report = TwoWaySyncEngine(fake, db, _pair(root)).run()
+        assert report.failed == 1
+        assert {c.file_id for c in report.remote_path_conflicts[0].candidates} == {
+            first, second,
+        }
+        assert not fake.uploads and not fake.updates
+        assert not fake.nodes[first]["trashed"] and not fake.nodes[second]["trashed"]
+    finally:
+        db.close()
+
+
+def test_owner_selected_canonical_id_survives_settings_reload(tmp_path: Path):
+    root = tmp_path / "sync"
+    root.mkdir()
+    (root / "same.txt").write_bytes(b"selected")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    first_duplicate = fake.add_file("same.txt", b"first", parent=folder)
+    second_duplicate = fake.add_file("same.txt", b"second", parent=folder)
+    canonical = fake.add_file("same.txt", b"selected", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(
+            str(root), "ElectriDrive/SyncTest",
+            canonical_remote_ids={"same.txt": canonical},
+        )
+        persisted = Settings.from_dict(Settings(sync_pairs=[pair]).to_dict())
+        reloaded_pair = persisted.sync_pairs[0]
+        first = TwoWaySyncEngine(fake, db, reloaded_pair).run()
+        assert first.failed == 0
+        assert first.remote_path_conflicts[0].resolved
+        assert first.remote_path_conflicts[0].canonical_id == canonical
+        assert {
+            candidate.file_id
+            for candidate in first.remote_path_conflicts[0].candidates
+        } == {first_duplicate, second_duplicate, canonical}
+
+        restarted_pair = Settings.from_dict(persisted.to_dict()).sync_pairs[0]
+        second = TwoWaySyncEngine(fake, db, restarted_pair).run()
+        assert second.failed == 0
+        assert second.uploaded == second.downloaded == 0
+        assert second.remote_path_conflicts[0].resolved
+        assert fake.nodes[canonical]["content"] == b"selected"
+        assert fake.nodes[first_duplicate]["content"] == b"first"
+        assert fake.nodes[second_duplicate]["content"] == b"second"
+        assert not fake.nodes[canonical]["trashed"]
+        assert not fake.nodes[first_duplicate]["trashed"]
+        assert not fake.nodes[second_duplicate]["trashed"]
+        assert not fake.updates and not fake.uploads
+    finally:
+        db.close()
+
+
+def test_duplicate_folder_and_file_folder_collisions_are_reported_without_mutation(
+    tmp_path: Path,
+):
+    root = tmp_path / "sync"
+    root.mkdir()
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    fake.add_folder("duplicate", parent=folder)
+    fake.add_folder("duplicate", parent=folder)
+    fake.add_file("also-folder", b"file", parent=folder)
+    fake.add_folder("also-folder", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        report = TwoWaySyncEngine(fake, db, _pair(root)).run()
+        assert report.failed >= 1
+        by_path = {item.remote_path: item for item in report.remote_path_conflicts}
+        assert len(by_path["duplicate"].candidates) == 2
+        assert len(by_path["also-folder"].candidates) == 2
+        assert not fake.uploads and not fake.updates
+        assert all(not node["trashed"] for node in fake.nodes.values())
+        assert not (root / "duplicate").exists()
+        assert not (root / "also-folder").exists()
+    finally:
+        db.close()
 
 
 def test_full_backup_upload_only_includes_hidden_credentials_build_and_temp_files(

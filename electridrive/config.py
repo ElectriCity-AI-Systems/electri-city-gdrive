@@ -133,6 +133,7 @@ class SyncPair:
     # User-requested Google-Drive-style full backup by default. Existing saved
     # pairs without this key inherit True on load.
     include_all_files: bool = True
+    canonical_remote_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

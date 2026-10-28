@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
 
 from electridrive.config import SyncPair
 from electridrive.ui import icons
+from electridrive.ui.drive_path_review import (
+    DrivePathReviewDialog, show_readable_information, show_readable_warning,
+)
 from electridrive.ui.theme import Palette
 from electridrive.ui.widgets import Card, EmptyState, ProHint
 
@@ -137,11 +140,13 @@ class SyncView(QWidget):
                            f"⌫{report.trashed_remote + report.trashed_local} "
                            f"⚠{report.conflicts}")
             if report.failed or report.unexplained_omissions:
+                # Remote-only duplicate names are harmless in upload-only mode.
+                # Do not interrupt a successful sync just to review them.
+                self._review_remote_path_conflicts(pair, report.remote_path_conflicts)
                 status.setText(f"Failed ({report.failed})")
                 status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
-                QMessageBox.warning(
-                    self,
-                    "Sync incomplete",
+                show_readable_warning(
+                    self, self._p, "Sync incomplete",
                     "\n".join(report.errors) or "The completeness assertion failed.",
                 )
             else:
@@ -151,7 +156,7 @@ class SyncView(QWidget):
             btn.setEnabled(True)
             status.setText("Failed")
             status.setStyleSheet(f"font-size: 12px; color: {self._p.danger};")
-            QMessageBox.warning(self, "Sync failed", msg)
+            show_readable_warning(self, self._p, "Sync failed", msg)
 
         self._session.submit(work, done, fail)
 
@@ -173,27 +178,56 @@ class SyncView(QWidget):
         def done(result):
             btn.setEnabled(True)
             btn.setText("Sync all")
+            for outcome in result.outcomes:
+                if outcome.report.failed or outcome.report.unexplained_omissions:
+                    self._review_remote_path_conflicts(
+                        outcome.pair, outcome.report.remote_path_conflicts
+                    )
             if result.failed_pairs:
                 detail = "\n".join(result.errors[:8])
-                QMessageBox.warning(
-                    self,
-                    "Some sync pairs failed",
+                show_readable_warning(
+                    self, self._p, "Some sync pairs failed",
                     f"Completed {result.successful_pairs} of {result.enabled_pairs} "
                     f"enabled pairs.\n\n{detail}",
                 )
             else:
-                QMessageBox.information(
-                    self,
-                    "Sync complete",
+                show_readable_information(
+                    self, self._p, "Sync complete",
                     f"All {result.successful_pairs} enabled sync pairs completed.",
                 )
 
         def fail(msg):
             btn.setEnabled(True)
             btn.setText("Sync all")
-            QMessageBox.warning(self, "Sync all failed", msg)
+            show_readable_warning(self, self._p, "Sync all failed", msg)
 
         self._session.submit(work, done, fail)
+
+    def _review_remote_path_conflicts(self, pair, conflicts):
+        """One accessible dialog per conflict; nothing is selected implicitly."""
+        changed = False
+        for conflict in conflicts:
+            # A previously reviewed canonical ID must not ask the owner
+            # again on every sync attempt.
+            if conflict.resolved:
+                continue
+            dialog = DrivePathReviewDialog(conflict, self._p, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                continue
+            candidate_id = dialog.selected_file_id()
+            if candidate_id is None:
+                continue
+            # Persist only a reviewed Drive ID. This dialog NEVER starts sync,
+            # updates, deletes, renames, or downloads any Drive objects.
+            pair.canonical_remote_ids[conflict.remote_path] = candidate_id
+            changed = True
+        if changed:
+            self._session.save()
+            show_readable_information(
+                self, self._p, "Reviewed file choice saved",
+                "The chosen Drive file ID was saved locally. No files were "
+                "changed. Review your choice before a separate Sync now.",
+            )
 
     def _add_pair(self):
         local = QFileDialog.getExistingDirectory(self, "Choose local folder", str(Path.home()))
