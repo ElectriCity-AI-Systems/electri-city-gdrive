@@ -97,7 +97,9 @@ class _Handler(BaseHTTPRequestHandler):
         expected = getattr(self.server, "expected_state", None)
         if (not isinstance(expected, str) or not expected
                 or len(state_values) != 1
-                or not hmac.compare_digest(state_values[0], expected)
+                or not hmac.compare_digest(
+                    state_values[0].encode("utf-8"), expected.encode("utf-8")
+                )
                 or any(len(values) != 1 for values in params.values())):
             self.send_error(400, "Invalid OAuth callback")
             return
