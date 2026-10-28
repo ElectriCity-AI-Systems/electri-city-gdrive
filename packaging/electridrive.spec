@@ -23,6 +23,10 @@ baked = os.path.join(ROOT, "electridrive", "google_api", "client_baked.json")
 if os.path.exists(baked):
     datas += [(baked, "electridrive/google_api")]
 
+channel = os.path.join(ROOT, "electridrive", "build_channel.txt")
+if os.path.exists(channel):
+    datas += [(channel, "electridrive")]
+
 a = Analysis(
     [os.path.join(ROOT, "app.py")],
     pathex=[ROOT],

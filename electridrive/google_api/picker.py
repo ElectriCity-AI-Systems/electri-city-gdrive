@@ -106,6 +106,8 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
 
     if not app_client.is_configured():
         raise PickerError("No OAuth client configured for the Picker.")
+    if not app_client.is_picker_configured():
+        raise PickerError("No Google Picker API key configured for this build.")
 
     httpd = HTTPServer(("127.0.0.1", 0), _Handler)
     httpd.captured = None
