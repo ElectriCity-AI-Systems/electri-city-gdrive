@@ -1,6 +1,13 @@
 # Customer candidate gate
 
-The public `v2.1.3` release is unchanged. Normal CI output is watermarked
+The public `v2.1.3` release is unchanged. Its original publication script
+(`scripts/publish_release_2_1_3.py`) added an embedded Desktop OAuth client
+from an independently checksum-verified older public package. That established
+release is **not** equivalent to a credential-free CI artifact. Whether the
+published client still works with a new Google account must be tested against
+the exact public binary; no inference of a missing client from a QA build.
+
+Normal CI output is watermarked
 `CI-QA — NOT FOR CUSTOMERS`; it is not a customer installer. A
 `CUSTOMER-CANDIDATE` build is not a release and is never published by the
 candidate workflow.
