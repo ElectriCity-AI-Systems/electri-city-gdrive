@@ -52,6 +52,7 @@ def test_extract_pick_result_error_raises():
         ("/?code=authorization-code", 400, False),
         ("/?state=&code=authorization-code", 400, False),
         ("/?state=wrong-state&code=authorization-code", 400, False),
+        ("/?state=%E2%98%83&code=authorization-code", 400, False),
         ("/?state=expected-state&state=wrong-state&code=authorization-code", 400, False),
         ("/?state=expected-state&code=one&code=two", 400, False),
         ("/favicon.ico?state=expected-state&code=authorization-code", 404, False),
