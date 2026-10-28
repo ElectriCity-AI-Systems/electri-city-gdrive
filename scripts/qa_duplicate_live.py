@@ -107,7 +107,10 @@ def find_oauth_client() -> Path:
                 and "REPLACE_WITH_YOUR" not in c.get("client_secret", "")):
                 return f
         except (OSError, UnicodeError, ValueError, AttributeError, TypeError):
-            pass
+            # Probe the next known developer-owned client config path.
+            # A missing, malformed, or unreadable candidate is not a reason
+            # to expose its contents or fail before checking the others.
+            continue
     fail("Keine vorhandene Google-Desktop-OAuth-Konfiguration gefunden. Keine Drive-Schreibaktion ausgeführt.")
 
 
