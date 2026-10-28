@@ -10,7 +10,7 @@ from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTextBrowser
 
 from electridrive.ui.drive_path_review import (
-    DrivePathReviewDialog, review_style, safe_preview_url,
+    DrivePathReviewDialog, safe_preview_url,
     show_readable_warning,
 )
 
@@ -391,3 +391,57 @@ def test_reviewer_contrast_exceeds_accessibility_minimum():
         bg, text = luminance(palette.surface), luminance(palette.text)
         ratio = (max(bg, text) + 0.05) / (min(bg, text) + 0.05)
         assert ratio >= 4.5, (name, ratio)
+
+
+
+def test_resolved_duplicate_does_not_show_dialog_again(qapp, tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    pair = SyncPair(str(tmp_path / "qa"), "ElectriDrive/QA", direction="up_only",
+                    enabled=True)
+    session = FakeSession([pair])
+    view = SyncView(session, get_palette("electric_dark"))
+    conflict = replace(
+        _duplicate_conflict(), resolved=True,
+        canonical_id="drive-id-candidate-001",
+    )
+
+    def unexpected_dialog(_dialog):
+        raise AssertionError("Resolved duplicate must not prompt again")
+
+    monkeypatch.setattr(DrivePathReviewDialog, "exec", unexpected_dialog)
+    try:
+        view._review_remote_path_conflicts(pair, [conflict])
+        assert session.submitted == []
+        assert pair.canonical_remote_ids == {}
+    finally:
+        _dispose(view, qapp)
+
+
+def test_successful_upload_only_sync_ignores_remote_only_duplicates(
+    qapp, tmp_path, monkeypatch,
+):
+    from electridrive.sync.twoway import SyncReport
+
+    pair = SyncPair(str(tmp_path / "qa"), "ElectriDrive/QA", direction="up_only",
+                    enabled=True)
+    session = FakeSession([pair])
+    view = SyncView(session, get_palette("electric_dark"))
+
+    def unexpected_dialog(_dialog):
+        raise AssertionError("Harmless remote-only duplicates must not prompt")
+
+    monkeypatch.setattr(DrivePathReviewDialog, "exec", unexpected_dialog)
+    try:
+        status, button = QLabel(), QPushButton()
+        view._sync_now(pair, status, button)
+        assert len(session.submitted) == 1
+        _work, on_result, _on_error = session.submitted[-1]
+        # The test drives only the GUI completion callback; no Drive API.
+        on_result(SyncReport(uploaded=1, remote_path_conflicts=[
+            _duplicate_conflict(),
+        ]))
+        assert status.text().startswith("↑1")
+        assert pair.canonical_remote_ids == {}
+    finally:
+        _dispose(view, qapp)
