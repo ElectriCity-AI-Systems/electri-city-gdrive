@@ -62,16 +62,14 @@ printf '[Desktop Entry]\nType=Application\nName=ElectriDrive\nExec=electridrive\
 printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/electridrive" "$@"\n' > "$APPDIR/AppRun"
 chmod +x "$APPDIR/AppRun"
 TOOL=build/appimagetool-x86_64.AppImage
-if [ ! -x "$TOOL" ]; then
-  mkdir -p build
-  curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-  chmod +x "$TOOL"
-fi
+RUNTIME=build/runtime-x86_64
+bash scripts/get_pinned_appimagetool.sh
+
 APPIMAGE=dist/ElectriDrive-x86_64.AppImage
 if [ "$BUILD_CHANNEL" = "CI-QA" ]; then
   APPIMAGE=dist/ElectriDrive-CI-QA-x86_64.AppImage
 fi
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" "$APPIMAGE"
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" "$APPDIR" "$APPIMAGE"
 
 # ---- .deb ----
 ROOT="dist/deb/electridrive_${VERSION}_amd64"
