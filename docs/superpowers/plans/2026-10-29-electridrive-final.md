@@ -46,3 +46,7 @@ restart. Check those explicitly in tests and final review.
 - Live QA: initial two-file preflight stopped before writes; verified synthetic media completion, then stale-ID safety PASS and successful restoration. No cloud deletions or personal sync.
 
 - Package verification: Debian build/GLIBC 2.35, Python 3.12.15 doctor, host GIO, token-free package scan and packaged Offscreen/XCB/Wayland startup all passed. Full 262-test suites passed on Python 3.14.4, 3.12.15 and older 3.10.12 (one upstream support warning only on 3.10).
+
+- Additional verified scope: five actual Dependabot alerts found at push, covering pinned urllib3 2.7.0 and oauthlib 3.3.1. Upgrade to advisory-patched 2.8.0 / 4.0.0; repeat release suite/build/package verification. Main alerts remain until a separately approved integration.
+
+- Final security validation: 262 tests passed in native patched Python-3.12.15 release image and fresh Python-3.14.4 venv. Actual PYZ versions confirmed (urllib3 2.8.0 / oauthlib 4.0.0); rebuilt Debian package passed GLIBC/doctor/GIO/profile scans and all three GUI startup modes again. No new cloud operations needed; live QA already used the same patched urllib3/oauthlib in the host venv.
