@@ -184,9 +184,38 @@ class NoWriteClient:
         self.unsafe_calls.append("unexpected-metadata")
         raise RuntimeError("Metadata read not required by fail-closed scan")
 
-    def __getattr__(self, name):
+    def _refuse(self, name):
         self.unsafe_calls.append(name)
         raise RuntimeError("QA guard refused sync client operation: " + name)
+
+    def create_folder(self, *args, **kwargs):
+        self._refuse("create_folder")
+
+    def upload_file(self, *args, **kwargs):
+        self._refuse("upload_file")
+
+    def update_file(self, *args, **kwargs):
+        self._refuse("update_file")
+
+    def download_file(self, *args, **kwargs):
+        self._refuse("download_file")
+
+    def export_file(self, *args, **kwargs):
+        self._refuse("export_file")
+
+    def trash(self, *args, **kwargs):
+        self._refuse("trash")
+
+    def untrash(self, *args, **kwargs):
+        self._refuse("untrash")
+
+    @property
+    def service(self):
+        self._refuse("service")
+
+    def __getattr__(self, name):
+        self.unsafe_calls.append("unknown:" + name)
+        raise AttributeError("QA guard has no client attribute: " + name)
 
 
 def prepare_credentials(isolated_profile: Path):
