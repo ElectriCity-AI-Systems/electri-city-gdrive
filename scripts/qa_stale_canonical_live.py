@@ -102,10 +102,11 @@ def validate_settings(cfg: Path, state: dict):
 
 def validate_remote(g, state: dict, chosen: str, *, temporary: str | None):
     folder = g.get_metadata(state["remote_folder_id"])
-    root_id = g.get_metadata("root").id
+    # The fixture's immutable folder ID, not an ambiguous name search, fixes
+    # the scope. Avoid a root-folder metadata request under drive.file OAuth.
     if (not folder.is_folder or folder.name != state["remote_folder"]
-            or folder.trashed or not ({"root", root_id} & set(folder.parents))):
-        stop("Synthetic QA folder ID is no longer rooted at My Drive.")
+            or folder.trashed or len(folder.parents) != 1):
+        stop("Synthetic QA folder ID or its parent is unexpected.")
     all_files = children(g, folder.id)
     ids = state["candidate_ids"]
     if len(all_files) != 3 or {f.id for f in all_files} != set(ids) | {
