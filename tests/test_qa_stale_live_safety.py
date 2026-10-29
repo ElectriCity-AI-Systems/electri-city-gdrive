@@ -23,9 +23,13 @@ def test_readonly_live_guard_rejects_all_engine_mutation_methods():
     assert guard.find_file("duplicate.txt", "qa-folder-id") is None
 
     for attr in ("create_folder", "upload_file", "update_file", "download_file",
-                 "trash", "untrash", "service", "export_file"):
+                 "trash", "untrash", "export_file"):
         with pytest.raises(RuntimeError):
-            getattr(guard, attr)
+            getattr(guard, attr)()
+    with pytest.raises(RuntimeError):
+        _ = guard.service
+    with pytest.raises(AttributeError):
+        _ = guard.undefined_operation
     with pytest.raises(RuntimeError):
         guard.list_folder("root")
     with pytest.raises(RuntimeError):
