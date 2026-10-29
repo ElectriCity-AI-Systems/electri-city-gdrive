@@ -445,3 +445,41 @@ def test_successful_upload_only_sync_ignores_remote_only_duplicates(
         assert pair.canonical_remote_ids == {}
     finally:
         _dispose(view, qapp)
+
+def test_stale_single_candidate_requires_explicit_review(qapp):
+    conflict = RemotePathConflict(
+        remote_path="same.txt", direction="up_only",
+        reason="The previously selected Drive file is no longer at this path.",
+        candidates=(RemotePathCandidate("survivor-id", False, 12, "2026-01-01"),),
+    )
+    dialog = DrivePathReviewDialog(conflict, get_palette("electric_dark"))
+    try:
+        assert dialog.choice.count() == 2
+        assert dialog.choice.currentData() is None
+        assert not dialog.save_choice.isEnabled()
+        dialog.choice.setCurrentIndex(1)
+        dialog.save_choice.click()
+        assert dialog.selected_file_id() == "survivor-id"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_missing_candidate_must_be_cleared_explicitly(qapp):
+    conflict = RemotePathConflict(
+        remote_path="same.txt", direction="up_only",
+        reason="The previously selected Drive file is no longer at this path.",
+        candidates=(),
+    )
+    dialog = DrivePathReviewDialog(conflict, get_palette("electric_dark"))
+    try:
+        assert not dialog.cleared_choice()
+        assert dialog.selected_file_id() is None
+        dialog.clear_choice.click()
+        assert dialog.cleared_choice()
+        assert dialog.selected_file_id() is None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
