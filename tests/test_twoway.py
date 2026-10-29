@@ -813,3 +813,92 @@ def test_full_backup_can_be_explicitly_disabled_for_legacy_filtered_sync(
         assert result.uploaded == 1
     finally:
         db.close()
+
+@pytest.mark.parametrize("direction", ["up_only", "two_way", "down_only"])
+def test_reviewed_drive_id_removed_blocks_surviving_duplicate_without_writes(
+    tmp_path: Path, direction: str,
+):
+    root = tmp_path / "sync"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"chosen original")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    chosen = fake.add_file("same.txt", b"chosen original", parent=folder)
+    untouched = fake.add_file("same.txt", b"unselected original", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction=direction, delete_policy="off",
+                        canonical_remote_ids={"same.txt": chosen})
+        engine = TwoWaySyncEngine(fake, db, pair)
+        assert engine.run().failed == 0
+        fake.trash(chosen)
+        local.write_bytes(b"changed locally")
+        updates_before = len(fake.updates)
+        uploads_before = len(fake.uploads)
+        result = engine.run()
+        assert result.failed >= 1
+        assert result.uploaded == result.downloaded == 0
+        assert result.trashed_local == result.trashed_remote == 0
+        assert len(fake.updates) == updates_before
+        assert len(fake.uploads) == uploads_before
+        assert fake.nodes[untouched]["content"] == b"unselected original"
+        assert local.read_bytes() == b"changed locally"
+        assert any(c.remote_path == "same.txt" and not c.resolved
+                   for c in result.remote_path_conflicts)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("direction", ["up_only", "two_way", "down_only"])
+def test_reviewed_drive_id_missing_entirely_blocks_before_sync(
+    tmp_path: Path, direction: str,
+):
+    root = tmp_path / "sync"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"original")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    chosen = fake.add_file("same.txt", b"original", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction=direction, delete_policy="off",
+                        canonical_remote_ids={"same.txt": chosen})
+        engine = TwoWaySyncEngine(fake, db, pair)
+        assert engine.run().failed == 0
+        fake.trash(chosen)
+        local.write_bytes(b"changed locally")
+        result = engine.run()
+        assert result.failed >= 1
+        assert result.uploaded == result.downloaded == 0
+        assert not fake.uploads and not fake.updates
+        assert local.read_bytes() == b"changed locally"
+        assert any(c.remote_path == "same.txt" and not c.candidates
+                   for c in result.remote_path_conflicts)
+    finally:
+        db.close()
+
+
+def test_reviewed_native_workspace_file_not_binary_upload_target(tmp_path: Path):
+    root = tmp_path / "sync"
+    root.mkdir()
+    (root / "Notes.docx").write_bytes(b"binary local")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    native = fake.add_file("Notes", b"native original", parent=folder,
+                           mime="application/vnd.google-apps.document")
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only",
+                        delete_policy="off",
+                        canonical_remote_ids={"Notes.docx": native})
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed >= 1
+        assert report.uploaded == report.downloaded == 0
+        assert not fake.uploads and not fake.updates
+        assert fake.nodes[native]["content"] == b"native original"
+    finally:
+        db.close()
