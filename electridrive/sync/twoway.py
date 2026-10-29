@@ -793,6 +793,34 @@ class TwoWaySyncEngine:
                     self._remote_scan_errors.append(
                         "ambiguous upload target: duplicate remote file path"
                     )
+        # A reviewed ID is an immutable binding, not a preference.  Even if
+        # the other duplicate is now the only file at this path, it must not
+        # inherit authorization to be updated or downloaded.
+        for rel, reviewed_id in sorted(self.pair.canonical_remote_ids.items()):
+            current = remote.get(rel)
+            if current is None or current.file_id != reviewed_id:
+                self._remote_scan_errors.append(
+                    "previously reviewed Drive file ID is missing or changed"
+                )
+                # Expose the remaining object(s) for explicit new review.
+                if rel not in self._path_conflict_candidates:
+                    self._path_conflict_candidates[rel] = {}
+                if current is not None:
+                    candidate = self._candidate_from_entry(current)
+                    self._path_conflict_candidates[rel][current.file_id] = candidate
+                self._path_conflict_reasons[rel] = (
+                    "The previously selected Drive file is no longer at this path."
+                )
+            elif self.pair.direction == "up_only" and current.is_google_doc:
+                self._remote_scan_errors.append(
+                    "reviewed Google Workspace file cannot be a binary upload target"
+                )
+                self._path_conflict_candidates[rel] = {
+                    current.file_id: self._candidate_from_entry(current)
+                }
+                self._path_conflict_reasons[rel] = (
+                    "A native Google Workspace file cannot accept binary uploads."
+                )
         report.remote_path_conflicts = self._path_conflicts(remote)
         if self._remote_scan_errors:
             self._remote_snapshot = None

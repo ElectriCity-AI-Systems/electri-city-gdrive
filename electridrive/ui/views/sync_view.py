@@ -214,6 +214,10 @@ class SyncView(QWidget):
             dialog = DrivePathReviewDialog(conflict, self._p, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 continue
+            if dialog.cleared_choice():
+                pair.canonical_remote_ids.pop(conflict.remote_path, None)
+                changed = True
+                continue
             candidate_id = dialog.selected_file_id()
             if candidate_id is None:
                 continue
@@ -224,9 +228,9 @@ class SyncView(QWidget):
         if changed:
             self._session.save()
             show_readable_information(
-                self, self._p, "Reviewed file choice saved",
-                "The chosen Drive file ID was saved locally. No files were "
-                "changed. Review your choice before a separate Sync now.",
+                self, self._p, "Drive review settings saved",
+                "Your reviewed Drive association changes were saved locally. "
+                "No Drive files were changed. A separate Sync now is required.",
             )
 
     def _add_pair(self):

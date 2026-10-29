@@ -445,3 +445,109 @@ def test_successful_upload_only_sync_ignores_remote_only_duplicates(
         assert pair.canonical_remote_ids == {}
     finally:
         _dispose(view, qapp)
+
+def test_stale_single_candidate_requires_explicit_review(qapp):
+    conflict = RemotePathConflict(
+        remote_path="same.txt", direction="up_only",
+        reason="The previously selected Drive file is no longer at this path.",
+        candidates=(RemotePathCandidate("survivor-id", False, 12, "2026-01-01"),),
+    )
+    dialog = DrivePathReviewDialog(conflict, get_palette("electric_dark"))
+    try:
+        assert dialog.choice.count() == 2
+        assert dialog.choice.currentData() is None
+        assert not dialog.save_choice.isEnabled()
+        dialog.choice.setCurrentIndex(1)
+        dialog.save_choice.click()
+        assert dialog.selected_file_id() == "survivor-id"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_missing_candidate_must_be_cleared_explicitly(qapp):
+    conflict = RemotePathConflict(
+        remote_path="same.txt", direction="up_only",
+        reason="The previously selected Drive file is no longer at this path.",
+        candidates=(),
+    )
+    dialog = DrivePathReviewDialog(conflict, get_palette("electric_dark"))
+    try:
+        assert not dialog.cleared_choice()
+        assert dialog.selected_file_id() is None
+        dialog.clear_choice.click()
+        assert dialog.cleared_choice()
+        assert dialog.selected_file_id() is None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_gui_stale_survivor_rebind_saves_without_sync(qapp, tmp_path, monkeypatch):
+    pair = SyncPair(str(tmp_path / "sync"), "ElectriDrive/QA",
+                    direction="up_only", enabled=True,
+                    canonical_remote_ids={"same.txt": "old-id"})
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    conflict = RemotePathConflict(
+        remote_path="same.txt", direction="up_only",
+        reason="The previously selected Drive file is no longer at this path.",
+        candidates=(RemotePathCandidate("survivor-id", False, 12, "2026-01-01"),),
+    )
+
+    def select_only_survivor(dialog):
+        assert dialog.choice.currentData() is None
+        assert not dialog.save_choice.isEnabled()
+        dialog.choice.setCurrentIndex(1)
+        dialog.save_choice.click()
+        return dialog.result()
+
+    monkeypatch.setattr(DrivePathReviewDialog, "exec", select_only_survivor)
+    monkeypatch.setattr(
+        "electridrive.ui.views.sync_view.show_readable_information",
+        lambda *args, **kwargs: None,
+    )
+    try:
+        view._review_remote_path_conflicts(pair, [conflict])
+        assert pair.canonical_remote_ids == {"same.txt": "survivor-id"}
+        assert saved == [True]
+        assert session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
+def test_gui_clear_stale_choice_saves_without_sync(qapp, tmp_path, monkeypatch):
+    pair = SyncPair(str(tmp_path / "sync"), "ElectriDrive/QA",
+                    direction="up_only", enabled=True,
+                    canonical_remote_ids={"same.txt": "missing-id"})
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    conflict = RemotePathConflict(
+        remote_path="same.txt", direction="up_only",
+        reason="The previously selected Drive file is no longer at this path.",
+        candidates=(),
+    )
+
+    def clear_missing(dialog):
+        assert dialog.cleared_choice() is False
+        dialog.clear_choice.click()
+        return dialog.result()
+
+    monkeypatch.setattr(DrivePathReviewDialog, "exec", clear_missing)
+    monkeypatch.setattr(
+        "electridrive.ui.views.sync_view.show_readable_information",
+        lambda *args, **kwargs: None,
+    )
+    try:
+        view._review_remote_path_conflicts(pair, [conflict])
+        assert pair.canonical_remote_ids == {}
+        assert saved == [True]
+        assert session.submitted == []
+    finally:
+        _dispose(view, qapp)
