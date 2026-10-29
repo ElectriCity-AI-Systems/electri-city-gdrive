@@ -368,7 +368,18 @@ class TwoWaySyncEngine:
         return out
 
     def scan_remote(self) -> dict[str, RemoteEntry]:
-        root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+        if self.pair.direction == "down_only":
+            # Resolving a download source must be read-only. A typo, moved
+            # folder or revoked access is not authority to create cloud data.
+            root_id = "root"
+            parts = self.pair.remote_folder.replace("\\", "/").split("/")
+            for part in (part.strip() for part in parts if part.strip()):
+                found = self.client.find_folder(part, root_id)
+                if found is None:
+                    raise ValueError("Download source Drive folder is missing or inaccessible")
+                root_id = found
+        else:
+            root_id = self.client.ensure_folder_path(self.pair.remote_folder)
         self._dir_ids = {"": root_id}
         self._remote_dirs = set()
         self._remote_scan_errors = []
@@ -390,6 +401,7 @@ class TwoWaySyncEngine:
         visited: set[str],
     ):
         page = None
+        seen_pages: set[str] = set()
         while True:
             listing = self.client.list_folder(folder_id, page)
             for f in listing.files:
@@ -472,6 +484,9 @@ class TwoWaySyncEngine:
             page = listing.next_page_token
             if not page:
                 break
+            if page in seen_pages:
+                raise RuntimeError("Drive folder listing returned a repeated page token")
+            seen_pages.add(page)
 
     def _add_remote_entry(
         self, entries: dict[str, RemoteEntry], candidate: RemoteEntry
@@ -650,13 +665,15 @@ class TwoWaySyncEngine:
     def _consume_changes(self, page_token: str) -> tuple[bool, str]:
         """Drain a Changes feed and return (had_changes, resume_token)."""
         page = page_token
+        seen_pages = {page_token}
         had_changes = False
         while True:
             changes, next_page, new_start = self.client.list_changes(page)
             had_changes = had_changes or bool(changes)
             if next_page:
-                if next_page == page:
+                if next_page in seen_pages:
                     raise RuntimeError("Drive Changes API returned a repeated page token")
+                seen_pages.add(next_page)
                 page = next_page
                 continue
             if not new_start:
@@ -1096,9 +1113,10 @@ class TwoWaySyncEngine:
                 conflict_stat.st_size,
                 md5_file(conflict_path),
             )
-            self._apply(
-                Action(ActionKind.UPLOAD, conflict_rel), local, remote, report
-            )
+            if self.pair.direction != "down_only":
+                self._apply(
+                    Action(ActionKind.UPLOAD, conflict_rel), local, remote, report
+                )
             self._download_remote(R, canonical)
             st = canonical.stat()
             local[rel] = LocalEntry(

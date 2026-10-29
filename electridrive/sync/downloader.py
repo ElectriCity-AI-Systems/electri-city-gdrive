@@ -90,6 +90,7 @@ def _walk_folder(
 ) -> None:
     page_token: str | None = None
     names: set[str] = set()
+    seen_pages: set[str] = set()
     while True:
         listing = client.list_folder(folder_id, page_token)
         for child in listing.files:
@@ -127,3 +128,6 @@ def _walk_folder(
         page_token = listing.next_page_token
         if not page_token:
             break
+        if page_token in seen_pages:
+            raise RuntimeError("Drive folder listing returned a repeated page token")
+        seen_pages.add(page_token)

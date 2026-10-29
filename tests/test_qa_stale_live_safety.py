@@ -71,3 +71,45 @@ def test_live_qa_recovery_record_never_overwrites(tmp_path, monkeypatch):
     with pytest.raises(FileExistsError):
         live.write_recovery({"selected_id": "wrong"})
     assert json.loads(live.RECOVERY.read_text()) == {"selected_id": "synthetic"}
+
+
+def test_recovery_refuses_changed_fixture_before_rename(tmp_path, monkeypatch):
+    from fakes import FakeDrive
+    from electridrive.google_api import client
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "duplicate.txt").write_bytes(b"chosen synthetic original")
+    (source / ".env").write_bytes(b"synthetic env")
+    (tmp_path / "seed-B.txt").write_bytes(b"other synthetic original")
+    fake = FakeDrive()
+    folder = fake.add_folder("ElectriDrive-QA-DUP-test")
+    temporary = ".PR19-QA-RENAMED-test.txt"
+    chosen = fake.add_file(temporary, b"externally changed bytes", parent=folder)
+    other = fake.add_file("duplicate.txt", b"other synthetic original", parent=folder)
+    fake.add_file(".env", b"synthetic env", parent=folder)
+    state = {"remote_folder_id": folder, "remote_folder": "ElectriDrive-QA-DUP-test",
+             "candidate_ids": [chosen, other]}
+    recovery = tmp_path / "recovery.json"
+    recovery.write_text(json.dumps({
+        **state, "selected_id": chosen, "temporary_name": temporary,
+        "original_name": "duplicate.txt",
+    }))
+    monkeypatch.setattr(live, "QA", tmp_path)
+    monkeypatch.setattr(live, "SOURCE", source)
+    monkeypatch.setattr(live, "RECOVERY", recovery)
+    monkeypatch.setattr(live, "load_qa", lambda: state)
+    monkeypatch.setattr(live, "configure_profile", lambda _: None)
+    monkeypatch.setattr(client, "GoogleDriveClient", lambda: fake)
+    renames = []
+
+    def rename(g, fid, name):
+        renames.append(fid)
+        g.nodes[fid]["name"] = name
+
+    monkeypatch.setattr(live, "rename_exact", rename)
+    with pytest.raises(SystemExit, match="not in its expected state"):
+        live.restore()
+    assert not renames
+    assert fake.nodes[chosen]["name"] == temporary
+    assert recovery.is_file()

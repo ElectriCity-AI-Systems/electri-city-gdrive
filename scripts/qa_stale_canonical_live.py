@@ -148,6 +148,19 @@ def rename_exact(g, selected_id: str, new_name: str):
     ).execute()
 
 
+def restore_selected(g, state: dict, selected_id: str, temporary: str):
+    """Validate the whole synthetic fixture before any recovery mutation."""
+    current = g.get_metadata(selected_id)
+    if current.parents != (state["remote_folder_id"],) or current.trashed:
+        stop("QA selected file was moved/trashed externally; no automatic recovery.")
+    if current.name == temporary:
+        validate_remote(g, state, selected_id, temporary=temporary)
+        rename_exact(g, selected_id, ORIGINAL_NAME)
+    elif current.name != ORIGINAL_NAME:
+        stop("QA file has unexpected name; no automatic changes.")
+    validate_remote(g, state, selected_id, temporary=None)
+
+
 class NoWriteClient:
     """Narrowest real-Drive reader surface for the actual sync engine.
 
@@ -298,14 +311,7 @@ def run():
             test_ok = True
         finally:
             # Only the previously checked synthetic selected ID is restored.
-            current = g.get_metadata(selected_id)
-            if (current.name == temporary
-                    and current.parents == (state["remote_folder_id"],)
-                    and not current.trashed):
-                rename_exact(g, selected_id, ORIGINAL_NAME)
-            elif current.name != ORIGINAL_NAME:
-                stop("Manual recovery required: selected QA file no longer has expected name.")
-            validate_remote(g, state, selected_id, temporary=None)
+            restore_selected(g, state, selected_id, temporary)
             RECOVERY.unlink()
         if test_ok:
             print("PR19 LIVE-SAFETY PASS: stale reviewed ID blocked.")
@@ -330,14 +336,7 @@ def restore():
     from electridrive.google_api.client import GoogleDriveClient
     g = GoogleDriveClient()
     fid = record["selected_id"]
-    current = g.get_metadata(fid)
-    if current.parents != (state["remote_folder_id"],) or current.trashed:
-        stop("QA selected file was moved/trashed externally; no automatic recovery.")
-    if current.name == record["temporary_name"]:
-        rename_exact(g, fid, ORIGINAL_NAME)
-    elif current.name != ORIGINAL_NAME:
-        stop("QA file has unexpected name; no automatic changes.")
-    validate_remote(g, state, fid, temporary=None)
+    restore_selected(g, state, fid, record["temporary_name"])
     RECOVERY.unlink()
     print("PR19 QA RESTORED: synthetic selected Drive file returned to original name.")
 

@@ -902,3 +902,94 @@ def test_reviewed_native_workspace_file_not_binary_upload_target(tmp_path: Path)
         assert fake.nodes[native]["content"] == b"native original"
     finally:
         db.close()
+
+
+def test_download_only_workspace_conflict_keeps_edits_without_cloud_writes(tmp_path: Path):
+    root = tmp_path / "sync"
+    root.mkdir()
+    local = root / "Notes.docx"
+    local.write_bytes(b"my edited export")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("QA")
+    native = fake.add_file("Notes", b"native original", parent=folder,
+                           mime="application/vnd.google-apps.document")
+    original_nodes = {key: dict(value) for key, value in fake.nodes.items()}
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "QA", direction="down_only", delete_policy="off")
+        engine = TwoWaySyncEngine(fake, db, pair)
+        report = engine.run()
+        assert report.failed == 0
+        assert local.read_bytes() == b"EXPORTED:native original"
+        copies = list(root.glob("Notes (conflict *).docx"))
+        assert len(copies) == 1 and copies[0].read_bytes() == b"my edited export"
+        assert report.uploaded == report.trashed_remote == report.trashed_local == 0
+        assert fake.nodes == original_nodes
+        assert not fake.uploads and not fake.updates
+        # A repeat must keep the local preservation copy out of remote authority.
+        assert engine.run().failed == 0
+        assert copies[0].read_bytes() == b"my edited export"
+        assert fake.nodes[native]["content"] == b"native original"
+    finally:
+        db.close()
+
+
+def test_remote_pagination_cycle_stops_before_any_transfer(tmp_path: Path):
+    from electridrive.google_api.client import FileListing
+
+    class CyclingDrive(FakeDrive):
+        get_start_page_token = None
+        list_changes = None
+        listing_calls = 0
+
+        def list_folder(self, parent_id="root", page_token=None):
+            self.listing_calls += 1
+            if self.listing_calls > 3:
+                raise RuntimeError("test watchdog: infinite pagination")
+            return FileListing([], "again")
+
+    root = tmp_path / "sync"
+    root.mkdir()
+    (root / "local.txt").write_bytes(b"preserve")
+    fake = CyclingDrive()
+    fake.ensure_folder_path("QA")
+    from contextlib import closing
+    with closing(SyncDatabase(tmp_path / "state.sqlite3")) as db:
+        report = TwoWaySyncEngine(fake, db, SyncPair(str(root), "QA")).run()
+    assert report.failed >= 1
+    assert any("repeated page token" in error for error in report.errors)
+    assert not fake.uploads and not fake.updates
+    assert (root / "local.txt").read_bytes() == b"preserve"
+
+
+def test_changes_feed_detects_multi_page_cycle(tmp_path: Path):
+    class CyclingDrive(FakeDrive):
+        calls = 0
+
+        def list_changes(self, page_token):
+            self.calls += 1
+            if self.calls > 4:
+                raise RuntimeError("test watchdog: infinite pagination")
+            return [], {"start": "a", "a": "b", "b": "a"}[page_token], None
+
+    fake = CyclingDrive()
+    from contextlib import closing
+    with closing(SyncDatabase(tmp_path / "state.sqlite3")) as db:
+        engine = TwoWaySyncEngine(fake, db, SyncPair(str(tmp_path), "QA"))
+        with pytest.raises(RuntimeError, match="repeated page token"):
+            engine._consume_changes("start")
+
+
+def test_download_only_missing_source_does_not_create_drive_folders(tmp_path: Path):
+    from contextlib import closing
+
+    root = tmp_path / "sync"
+    root.mkdir()
+    (root / "keep.txt").write_bytes(b"local original")
+    fake = FakeDrive()
+    with closing(SyncDatabase(tmp_path / "state.sqlite3")) as db:
+        pair = SyncPair(str(root), "QA/Missing", direction="down_only")
+        report = TwoWaySyncEngine(fake, db, pair).run()
+    assert report.failed >= 1
+    assert set(fake.nodes) == {"root"}
+    assert (root / "keep.txt").read_bytes() == b"local original"

@@ -217,14 +217,7 @@ class GoogleDriveClient:
         ]
         if parent_id:
             query.append(f"'{parent_id}' in parents")
-        response = self.service.files().list(
-            q=" and ".join(query),
-            spaces="drive",
-            fields="files(id, name)",
-            pageSize=10,
-        ).execute()
-        files = response.get("files", [])
-        return files[0]["id"] if files else None
+        return self._unique_path_match(query, name, binary_only=False)
 
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
         metadata = {"name": name, "mimeType": DRIVE_FOLDER_MIME}
@@ -246,20 +239,42 @@ class GoogleDriveClient:
             f"'{parent_id}' in parents",
             "trashed = false",
         ]
-        response = self.service.files().list(
-            q=" and ".join(query),
-            spaces="drive",
-            fields="files(id, mimeType)",
-            pageSize=100,
-            orderBy="createdTime",
-        ).execute()
-        for item in response.get("files", []):
-            mime = item.get("mimeType") or ""
-            if mime != DRIVE_FOLDER_MIME and not mime.startswith(
-                "application/vnd.google-apps."
-            ):
-                return item["id"]
-        return None
+        return self._unique_path_match(query, name, binary_only=True)
+
+    def _unique_path_match(
+        self, query: list[str], name: str, *, binary_only: bool
+    ) -> str | None:
+        """Resolve a name only after all pages establish one immutable ID.
+
+        The legacy upload engine and root-folder resolution must never choose
+        the first of several equally named objects. Workspace-only pages do
+        not establish that no binary match exists on a later page.
+        """
+        ids: set[str] = set()
+        page = None
+        seen: set[str] = set()
+        while True:
+            response = self.service.files().list(
+                q=" and ".join(query), spaces="drive",
+                fields="nextPageToken, files(id, mimeType)",
+                pageSize=100, pageToken=page,
+            ).execute()
+            for item in response.get("files", []):
+                mime = item.get("mimeType") or ""
+                if binary_only and mime.startswith("application/vnd.google-apps."):
+                    continue
+                ids.add(item["id"])
+                if len(ids) > 1:
+                    raise ValueError(
+                        f"Ambiguous Drive path {name!r}: multiple IDs; "
+                        "review the destination before syncing."
+                    )
+            page = response.get("nextPageToken")
+            if not page:
+                return next(iter(ids), None)
+            if page in seen:
+                raise RuntimeError("Drive lookup returned a repeated page token")
+            seen.add(page)
 
     def ensure_folder_path(self, remote_path: str) -> str:
         parts = [p.strip() for p in remote_path.replace("\\", "/").split("/") if p.strip()]
