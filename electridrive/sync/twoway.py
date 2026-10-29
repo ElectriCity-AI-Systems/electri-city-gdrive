@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
@@ -82,6 +83,7 @@ class RemotePathConflict:
     candidates: tuple[RemotePathCandidate, ...]
     canonical_id: str = ""
     resolved: bool = False
+    blocks_sync: bool = True
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,7 @@ class SyncReport:
     unexplained_omissions: int = 0
     errors: list[str] = field(default_factory=list)
     remote_path_conflicts: list[RemotePathConflict] = field(default_factory=list)
+    blocked_before_transfers: bool = False
 
 
 def _parse_iso(iso: str) -> float:
@@ -368,6 +371,16 @@ class TwoWaySyncEngine:
         return out
 
     def scan_remote(self) -> dict[str, RemoteEntry]:
+        # A failed root lookup must not expose candidates from a previous run.
+        self._dir_ids = {}
+        self._remote_dirs = set()
+        self._remote_scan_errors = []
+        self._duplicate_remote_ids = {}
+        self._path_conflict_candidates = {}
+        self._path_conflict_reasons = {}
+        self._dir_candidates = {}
+        self._duplicate_file_paths = set()
+        self._remote_excluded = 0
         if self.pair.direction == "down_only":
             # Resolving a download source must be read-only. A typo, moved
             # folder or revoked access is not authority to create cloud data.
@@ -381,14 +394,6 @@ class TwoWaySyncEngine:
         else:
             root_id = self.client.ensure_folder_path(self.pair.remote_folder)
         self._dir_ids = {"": root_id}
-        self._remote_dirs = set()
-        self._remote_scan_errors = []
-        self._duplicate_remote_ids = {}
-        self._path_conflict_candidates = {}
-        self._path_conflict_reasons = {}
-        self._dir_candidates = {}
-        self._duplicate_file_paths = set()
-        self._remote_excluded = 0
         entries: dict[str, RemoteEntry] = {}
         self._walk_remote(root_id, "", entries, {root_id})
         return entries
@@ -591,7 +596,9 @@ class TwoWaySyncEngine:
         for candidate in candidates:
             by_id[candidate.file_id] = candidate
 
-    def _path_conflicts(self, remote: dict[str, RemoteEntry]) -> list[RemotePathConflict]:
+    def _path_conflicts(
+        self, remote: dict[str, RemoteEntry], local_paths: set[str],
+    ) -> list[RemotePathConflict]:
         conflicts = []
         for rel, candidates in sorted(self._path_conflict_candidates.items()):
             ids = set(candidates)
@@ -611,6 +618,13 @@ class TwoWaySyncEngine:
                     candidates=tuple(candidates[key] for key in sorted(candidates)),
                     canonical_id=canonical_id if resolved else "",
                     resolved=resolved,
+                    blocks_sync=not resolved and not (
+                        self.pair.direction == "up_only"
+                        and rel in self._duplicate_file_paths
+                        and rel not in local_paths
+                        and rel not in self.pair.canonical_remote_ids
+                        and all(not item.is_folder for item in candidates.values())
+                    ),
                 )
             )
         return conflicts
@@ -737,7 +751,7 @@ class TwoWaySyncEngine:
 
     # --------------------------------------------------------------- execute
     def run(self) -> SyncReport:
-        report = SyncReport()
+        report = SyncReport(blocked_before_transfers=True)
         if self.pair.direction not in {"two_way", "up_only", "down_only"}:
             self._report_failure(
                 report, f"unsupported sync direction: {self.pair.direction!r}"
@@ -778,7 +792,7 @@ class TwoWaySyncEngine:
         try:
             remote = self._remote_for_run()
         except Exception as exc:
-            report.remote_path_conflicts = self._path_conflicts({})
+            report.remote_path_conflicts = self._path_conflicts({}, set(local))
             self._report_failure(report, f"remote tree scan failed: {exc}")
             return report
         report.scanned_remote_files = len(remote)
@@ -838,13 +852,21 @@ class TwoWaySyncEngine:
                 self._path_conflict_reasons[rel] = (
                     "A native Google Workspace file cannot accept binary uploads."
                 )
-        report.remote_path_conflicts = self._path_conflicts(remote)
+        report.remote_path_conflicts = self._path_conflicts(remote, set(local))
         if self._remote_scan_errors:
             self._remote_snapshot = None
-            for error in self._remote_scan_errors:
-                self._report_failure(report, f"remote traversal incomplete: {error}")
+            # Keep the validation counter, but do not log an indistinguishable
+            # line for every affected path. Names/IDs stay in structured UI
+            # data, rather than being disclosed in diagnostic logs.
+            for error, count in Counter(self._remote_scan_errors).items():
+                detail = f" ({count} checks)" if count > 1 else ""
+                self._report_failure(
+                    report, f"remote traversal incomplete: {error}{detail}",
+                    count=count,
+                )
             return report
 
+        report.blocked_before_transfers = False
         self._sync_directories(report)
         actions = reconcile(local, remote, last,
                             direction=self.pair.direction,
@@ -874,8 +896,8 @@ class TwoWaySyncEngine:
         return report
 
     @staticmethod
-    def _report_failure(report: SyncReport, message: str) -> None:
-        report.failed += 1
+    def _report_failure(report: SyncReport, message: str, *, count: int = 1) -> None:
+        report.failed += count
         report.errors.append(message)
         LOGGER.error("Sync failed: %s", message)
 

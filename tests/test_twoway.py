@@ -993,3 +993,83 @@ def test_download_only_missing_source_does_not_create_drive_folders(tmp_path: Pa
     assert report.failed >= 1
     assert set(fake.nodes) == {"root"}
     assert (root / "keep.txt").read_bytes() == b"local original"
+
+
+def test_four_ambiguous_paths_count_checks_but_log_one_summary(tmp_path, caplog):
+    from copy import deepcopy
+    from contextlib import closing
+
+    root = tmp_path / "synthetic"
+    root.mkdir()
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("QA")
+    names = ("alpha.txt", "beta.txt", "gamma.txt", "delta.txt")
+    for name in names:
+        (root / name).write_bytes(b"local synthetic")
+        for index in range(3):
+            fake.add_file(name, str(index).encode(), parent=folder)
+    before = deepcopy(fake.nodes)
+    with closing(SyncDatabase(tmp_path / "state.sqlite3")) as db:
+        report = TwoWaySyncEngine(fake, db, SyncPair(
+            str(root), "QA", direction="up_only", delete_policy="off",
+        )).run()
+    assert report.failed == 4  # paths, not the twelve candidate IDs or retries
+    assert len(report.errors) == 1
+    assert report.blocked_before_transfers
+    records = [r for r in caplog.records if "ambiguous upload target" in r.getMessage()]
+    assert len(records) == 1
+    assert "4" in records[0].getMessage()
+    assert {c.remote_path for c in report.remote_path_conflicts if c.blocks_sync} == set(names)
+    assert all(len(c.candidates) == 3 for c in report.remote_path_conflicts)
+    assert report.uploaded == report.downloaded == report.trashed_remote == report.trashed_local == 0
+    assert fake.nodes == before
+
+
+def test_remote_only_duplicates_are_not_offered_as_blocking_upload_targets(tmp_path):
+    from contextlib import closing
+
+    root = tmp_path / "synthetic"
+    root.mkdir()
+    (root / "target.txt").write_bytes(b"local synthetic")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("QA")
+    for name in ("target.txt", "remote-only.txt"):
+        fake.add_file(name, b"first", parent=folder)
+        fake.add_file(name, b"second", parent=folder)
+    with closing(SyncDatabase(tmp_path / "state.sqlite3")) as db:
+        report = TwoWaySyncEngine(fake, db, SyncPair(
+            str(root), "QA", direction="up_only",
+        )).run()
+    assert report.failed == 1
+    blockers = {c.remote_path for c in report.remote_path_conflicts
+                if getattr(c, "blocks_sync", True)}
+    assert blockers == {"target.txt"}
+    assert not fake.uploads and not fake.updates
+
+
+def test_failed_root_rescan_does_not_offer_old_duplicate_candidates(tmp_path):
+    from contextlib import closing
+
+    class UnavailableDrive(FakeDrive):
+        unavailable = False
+
+        def ensure_folder_path(self, path):
+            if self.unavailable:
+                raise RuntimeError("synthetic root unavailable")
+            return super().ensure_folder_path(path)
+
+    root = tmp_path / "synthetic"
+    root.mkdir()
+    (root / "target.txt").write_bytes(b"local synthetic")
+    fake = UnavailableDrive()
+    folder = fake.ensure_folder_path("QA")
+    fake.add_file("target.txt", b"first", parent=folder)
+    fake.add_file("target.txt", b"second", parent=folder)
+    with closing(SyncDatabase(tmp_path / "state.sqlite3")) as db:
+        engine = TwoWaySyncEngine(fake, db, SyncPair(str(root), "QA", direction="up_only"))
+        assert engine.run().remote_path_conflicts
+        fake.unavailable = True
+        report = engine.run()
+    assert report.failed == 1
+    assert report.remote_path_conflicts == []
+    assert not fake.uploads and not fake.updates

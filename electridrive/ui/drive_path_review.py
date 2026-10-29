@@ -196,11 +196,14 @@ class DrivePathReviewDialog(QDialog):
             self.choice.setVisible(False)
 
         warning = QLabel(
-            "Saving a choice makes NO changes in Drive. A separately started "
-            "Sync now may update the chosen Drive file. Cancel to keep everything unchanged."
-            if selectable else
-            "No automatic selection or file changes will be made. "
-            "Close to leave this conflict unresolved."
+            "Candidates are from the last scan; this dialog does not check Drive. "
+            + (
+                "Saving a choice makes NO changes in Drive. A separately started "
+                "Sync now may update the chosen Drive file. Cancel to keep everything unchanged."
+                if selectable else
+                "No automatic selection or file changes will be made. "
+                "Close to leave this conflict unresolved."
+            )
         )
         warning.setObjectName("ReviewSafetyWarning")
         warning.setTextFormat(Qt.PlainText)
