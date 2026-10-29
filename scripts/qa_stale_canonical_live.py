@@ -102,8 +102,9 @@ def validate_settings(cfg: Path, state: dict):
 
 def validate_remote(g, state: dict, chosen: str, *, temporary: str | None):
     folder = g.get_metadata(state["remote_folder_id"])
+    root_id = g.get_metadata("root").id
     if (not folder.is_folder or folder.name != state["remote_folder"]
-            or folder.trashed or "root" not in folder.parents):
+            or folder.trashed or not ({"root", root_id} & set(folder.parents))):
         stop("Synthetic QA folder ID is no longer rooted at My Drive.")
     all_files = children(g, folder.id)
     ids = state["candidate_ids"]
