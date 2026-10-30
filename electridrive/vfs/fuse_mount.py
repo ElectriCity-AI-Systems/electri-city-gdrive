@@ -9,6 +9,12 @@ Workspace files are exported on first read. The mount is intentionally read-only
 """
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
+def _deny_qa_fuse():
+    if qa.current_policy():
+        raise qa.QaSafetyError("QA safety stop: FUSE is disabled")
+
 import json
 import logging
 import shutil
@@ -45,6 +51,7 @@ class DriveTree:
     """Lazy, cached view of a Drive subtree for the virtual filesystem."""
 
     def __init__(self, client, root_id: str, cache_dir: Path, ttl: float = 30.0):
+        _deny_qa_fuse()
         self.client = client
         self.root_id = root_id
         self.cache_dir = Path(cache_dir)
@@ -297,6 +304,7 @@ class FuseMount:
     """Manages a background FUSE mount of a Drive folder."""
 
     def __init__(self, client, cache_dir: Path):
+        _deny_qa_fuse()
         self.client = client
         self.cache_dir = Path(cache_dir)
         self._thread: threading.Thread | None = None
@@ -307,6 +315,7 @@ class FuseMount:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self, mountpoint: str, remote_folder: str = "", writable: bool = False):
+        _deny_qa_fuse()
         if writable:
             raise ValueError("ElectriDrive Virtual Drive is read-only in version 2.1.2")
         if self.is_mounted:

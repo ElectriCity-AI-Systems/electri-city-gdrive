@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from electridrive.google_api.client import GoogleDriveClient
 
 
@@ -116,3 +118,54 @@ def test_find_file_reuses_only_binary_media_in_the_exact_parent():
     assert "name = 'report.txt'" in query
     assert "'parent-id' in parents" in query
     assert "trashed = false" in query
+
+
+class _PagedService:
+    def __init__(self, pages):
+        self.pages = pages
+        self.requests = []
+
+    def files(self):
+        return self
+
+    def list(self, **kwargs):
+        self.requests.append(kwargs)
+        return _Response(self.pages[kwargs.get("pageToken")])
+
+
+@pytest.mark.parametrize("lookup", ["folder", "file"])
+@pytest.mark.parametrize("paginated", [False, True])
+def test_lookup_refuses_distinct_ids_before_selecting_a_target(lookup, paginated):
+    mime = "application/vnd.google-apps.folder" if lookup == "folder" else "text/plain"
+    first = {"id": "first", "mimeType": mime}
+    second = {"id": "second", "mimeType": mime}
+    pages = {
+        None: {"files": [first], "nextPageToken": "page-2"},
+        "page-2": {"files": [second]},
+    } if paginated else {None: {"files": [first, second]}}
+    client = GoogleDriveClient(service=_PagedService(pages))
+    with pytest.raises(ValueError, match="(?i)ambiguous"):
+        if lookup == "folder":
+            client.ensure_folder_path("QA")
+        else:
+            client.find_file("QA.txt", "qa-parent")
+
+
+def test_binary_lookup_finds_match_after_workspace_only_page():
+    service = _PagedService({
+        None: {"files": [{"id": "native", "mimeType": "application/vnd.google-apps.document"}],
+               "nextPageToken": "page-2"},
+        "page-2": {"files": [{"id": "binary", "mimeType": "text/plain"}]},
+    })
+    assert GoogleDriveClient(service=service).find_file("QA.txt", "qa-parent") == "binary"
+
+
+@pytest.mark.parametrize("lookup", ["folder", "file"])
+def test_lookup_rejects_repeated_page_token(lookup):
+    service = _PagedService({
+        None: {"files": [], "nextPageToken": "again"},
+        "again": {"files": [], "nextPageToken": "again"},
+    })
+    client = GoogleDriveClient(service=service)
+    with pytest.raises(RuntimeError, match="repeated page token"):
+        getattr(client, "find_" + lookup)("QA", "root")

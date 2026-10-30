@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
+from electridrive import qa_policy as qa
 from electridrive.google_api.client import DriveClientProtocol, RemoteFile
 from electridrive.sync.downloader import plan_download
 from electridrive.sync.uploader import plan_upload
@@ -93,7 +94,8 @@ class TransferManager:
         on_update: UpdateCB | None = None,
         on_log: LogCB | None = None,
     ):
-        self._client = client
+        qa.check_startup()
+        self._client = qa.restrict_client(client)
         self._max_workers = max(1, max_workers)
         self._on_update = on_update
         self._on_log = on_log
@@ -172,6 +174,7 @@ class TransferManager:
             old = self._transfers.get(transfer_id)
             if not old or old.state != TransferState.FAILED:
                 return None
+            self._validate_transfer(old)
             new = self._new_transfer(
                 old.kind, old.name, total=old.total, local_path=old.local_path,
                 dest_path=old.dest_path, parent_id=old.parent_id, file_id=old.file_id,
@@ -228,6 +231,18 @@ class TransferManager:
             finally:
                 self._queue.task_done()
 
+    def _validate_transfer(self, t: Transfer) -> None:
+        qa.check_startup()
+        self._client = qa.restrict_client(self._client)
+        if t.kind == TransferKind.UPLOAD:
+            qa.require_local(t.local_path)
+            if qa.current_policy():
+                self._client.get_metadata(t.parent_id)
+        else:
+            qa.require_local(t.dest_path, exists=False)
+            if qa.current_policy():
+                self._client.get_metadata(t.file_id)
+
     def _run(self, t: Transfer) -> None:
         with self._cond:
             if t.is_terminal:  # canceled while still queued
@@ -245,6 +260,7 @@ class TransferManager:
             self._emit(t)
 
         try:
+            self._validate_transfer(t)
             if t.kind == TransferKind.UPLOAD:
                 assert t.local_path is not None
                 t.file_id = self._client.upload_file(t.local_path, t.parent_id, t.name, progress)

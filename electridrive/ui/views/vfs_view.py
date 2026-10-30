@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from electridrive import qa_policy as qa
 from electridrive.ui import icons
 from electridrive.ui.theme import Palette
 from electridrive.ui.widgets import Card, ProHint
@@ -123,6 +124,11 @@ class VfsView(QWidget):
         return self._session.fuse_mount
 
     def _refresh(self):
+        if qa.current_policy():
+            self.status.setText("QA MODE — Virtual Drive / FUSE disabled")
+            self.mount_btn.setEnabled(False)
+            self.open_btn.setEnabled(False)
+            return
         mount = self._session.fuse_mount
         if mount and mount.is_mounted:
             self.status.setText(f"Mounted at {mount.mountpoint}")
@@ -143,6 +149,9 @@ class VfsView(QWidget):
             self.mp_input.setText(path)
 
     def _toggle_mount(self):
+        if qa.current_policy():
+            QMessageBox.warning(self, "QA safety", "Virtual Drive / FUSE is disabled in QA mode.")
+            return
         mount = self._mount_obj()
         if mount.is_mounted:
             mount.stop()

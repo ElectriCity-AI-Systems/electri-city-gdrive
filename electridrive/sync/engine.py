@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +53,7 @@ class UploadOnlySyncEngine:
             self.log_callback(message)
 
     def iter_candidate_files(self, root: Path) -> Iterable[Path]:
+        qa.check_startup()
         inventory = scan_local_tree(root, self.rules)
         if inventory.errors and self.rules.fail_on_unsupported:
             raise RuntimeError(
@@ -59,6 +62,7 @@ class UploadOnlySyncEngine:
         yield from inventory.files
 
     def should_upload(self, file_path: Path, sha256: str) -> bool:
+        qa.require_local(file_path)
         stat = file_path.stat()
         record = self.database.get_file(str(file_path))
         if record is None:
@@ -66,6 +70,10 @@ class UploadOnlySyncEngine:
         return not (record.size == stat.st_size and record.mtime_ns == stat.st_mtime_ns and record.sha256 == sha256)
 
     def sync_up(self, local_root: Path, remote_folder: str) -> SyncResult:
+        qa.check_startup()
+        from electridrive.config import SyncPair
+        qa.validate_pair(SyncPair(str(local_root), remote_folder, direction="up_only", delete_policy="off"))
+        self.drive_client = qa.restrict_client(self.drive_client)
         result = SyncResult()
         local_root = canonical_sync_root(local_root)
 

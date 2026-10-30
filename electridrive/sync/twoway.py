@@ -15,9 +15,12 @@ Safety guarantees:
 """
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import hashlib
 import logging
 import shutil
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
@@ -82,6 +85,7 @@ class RemotePathConflict:
     candidates: tuple[RemotePathCandidate, ...]
     canonical_id: str = ""
     resolved: bool = False
+    blocks_sync: bool = True
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,7 @@ class SyncReport:
     unexplained_omissions: int = 0
     errors: list[str] = field(default_factory=list)
     remote_path_conflicts: list[RemotePathConflict] = field(default_factory=list)
+    blocked_before_transfers: bool = False
 
 
 def _parse_iso(iso: str) -> float:
@@ -289,7 +294,9 @@ def _conflict_name(rel: str) -> str:
 class TwoWaySyncEngine:
     def __init__(self, client, db, pair, rules: SyncRules | None = None,
                  log_cb=None):
-        self.client = client
+        qa.check_startup()
+        qa.validate_pair(pair)
+        self.client = qa.restrict_client(client)
         self.db = db
         self.pair = pair
         # Full backup is the default for configured sync pairs, including
@@ -345,6 +352,8 @@ class TwoWaySyncEngine:
 
     # ------------------------------------------------------------- snapshots
     def scan_local(self) -> dict[str, LocalEntry]:
+        qa.check_startup()
+        qa.validate_pair(self.pair)
         out: dict[str, LocalEntry] = {}
         tree = scan_local_tree(self.local_root, self.rules)
         self.local_root = tree.root
@@ -368,8 +377,11 @@ class TwoWaySyncEngine:
         return out
 
     def scan_remote(self) -> dict[str, RemoteEntry]:
-        root_id = self.client.ensure_folder_path(self.pair.remote_folder)
-        self._dir_ids = {"": root_id}
+        qa.check_startup()
+        qa.validate_pair(self.pair)
+        self.client = qa.restrict_client(self.client)
+        # A failed root lookup must not expose candidates from a previous run.
+        self._dir_ids = {}
         self._remote_dirs = set()
         self._remote_scan_errors = []
         self._duplicate_remote_ids = {}
@@ -378,6 +390,21 @@ class TwoWaySyncEngine:
         self._dir_candidates = {}
         self._duplicate_file_paths = set()
         self._remote_excluded = 0
+        if qa.current_policy():
+            root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+        elif self.pair.direction == "down_only":
+            # Resolving a download source must be read-only. A typo, moved
+            # folder or revoked access is not authority to create cloud data.
+            root_id = "root"
+            parts = self.pair.remote_folder.replace("\\", "/").split("/")
+            for part in (part.strip() for part in parts if part.strip()):
+                found = self.client.find_folder(part, root_id)
+                if found is None:
+                    raise ValueError("Download source Drive folder is missing or inaccessible")
+                root_id = found
+        else:
+            root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+        self._dir_ids = {"": root_id}
         entries: dict[str, RemoteEntry] = {}
         self._walk_remote(root_id, "", entries, {root_id})
         return entries
@@ -390,6 +417,7 @@ class TwoWaySyncEngine:
         visited: set[str],
     ):
         page = None
+        seen_pages: set[str] = set()
         while True:
             listing = self.client.list_folder(folder_id, page)
             for f in listing.files:
@@ -472,6 +500,9 @@ class TwoWaySyncEngine:
             page = listing.next_page_token
             if not page:
                 break
+            if page in seen_pages:
+                raise RuntimeError("Drive folder listing returned a repeated page token")
+            seen_pages.add(page)
 
     def _add_remote_entry(
         self, entries: dict[str, RemoteEntry], candidate: RemoteEntry
@@ -576,7 +607,9 @@ class TwoWaySyncEngine:
         for candidate in candidates:
             by_id[candidate.file_id] = candidate
 
-    def _path_conflicts(self, remote: dict[str, RemoteEntry]) -> list[RemotePathConflict]:
+    def _path_conflicts(
+        self, remote: dict[str, RemoteEntry], local_paths: set[str],
+    ) -> list[RemotePathConflict]:
         conflicts = []
         for rel, candidates in sorted(self._path_conflict_candidates.items()):
             ids = set(candidates)
@@ -596,6 +629,13 @@ class TwoWaySyncEngine:
                     candidates=tuple(candidates[key] for key in sorted(candidates)),
                     canonical_id=canonical_id if resolved else "",
                     resolved=resolved,
+                    blocks_sync=not resolved and not (
+                        self.pair.direction == "up_only"
+                        and rel in self._duplicate_file_paths
+                        and rel not in local_paths
+                        and rel not in self.pair.canonical_remote_ids
+                        and all(not item.is_folder for item in candidates.values())
+                    ),
                 )
             )
         return conflicts
@@ -650,13 +690,15 @@ class TwoWaySyncEngine:
     def _consume_changes(self, page_token: str) -> tuple[bool, str]:
         """Drain a Changes feed and return (had_changes, resume_token)."""
         page = page_token
+        seen_pages = {page_token}
         had_changes = False
         while True:
             changes, next_page, new_start = self.client.list_changes(page)
             had_changes = had_changes or bool(changes)
             if next_page:
-                if next_page == page:
+                if next_page in seen_pages:
                     raise RuntimeError("Drive Changes API returned a repeated page token")
+                seen_pages.add(next_page)
                 page = next_page
                 continue
             if not new_start:
@@ -720,7 +762,10 @@ class TwoWaySyncEngine:
 
     # --------------------------------------------------------------- execute
     def run(self) -> SyncReport:
-        report = SyncReport()
+        qa.check_startup()
+        qa.validate_pair(self.pair)
+        self.client = qa.restrict_client(self.client)
+        report = SyncReport(blocked_before_transfers=True)
         if self.pair.direction not in {"two_way", "up_only", "down_only"}:
             self._report_failure(
                 report, f"unsupported sync direction: {self.pair.direction!r}"
@@ -735,7 +780,10 @@ class TwoWaySyncEngine:
         try:
             requested_root = Path(self.pair.local_path).expanduser()
             if self.pair.direction == "down_only" and not requested_root.exists():
-                requested_root.mkdir(mode=0o700, parents=True)
+                if qa.current_policy():
+                    qa.mkdir(requested_root)
+                else:
+                    requested_root.mkdir(mode=0o700, parents=True)
             self.local_root = canonical_sync_root(requested_root)
             local = self.scan_local()
         except Exception as exc:
@@ -761,7 +809,7 @@ class TwoWaySyncEngine:
         try:
             remote = self._remote_for_run()
         except Exception as exc:
-            report.remote_path_conflicts = self._path_conflicts({})
+            report.remote_path_conflicts = self._path_conflicts({}, set(local))
             self._report_failure(report, f"remote tree scan failed: {exc}")
             return report
         report.scanned_remote_files = len(remote)
@@ -793,13 +841,49 @@ class TwoWaySyncEngine:
                     self._remote_scan_errors.append(
                         "ambiguous upload target: duplicate remote file path"
                     )
-        report.remote_path_conflicts = self._path_conflicts(remote)
+        # A reviewed ID is an immutable binding, not a preference.  Even if
+        # the other duplicate is now the only file at this path, it must not
+        # inherit authorization to be updated or downloaded.
+        for rel, reviewed_id in sorted(self.pair.canonical_remote_ids.items()):
+            current = remote.get(rel)
+            if current is None or current.file_id != reviewed_id:
+                self._remote_scan_errors.append(
+                    "previously reviewed Drive file ID is missing or changed"
+                )
+                # Expose the remaining object(s) for explicit new review.
+                if rel not in self._path_conflict_candidates:
+                    self._path_conflict_candidates[rel] = {}
+                if current is not None:
+                    candidate = self._candidate_from_entry(current)
+                    self._path_conflict_candidates[rel][current.file_id] = candidate
+                self._path_conflict_reasons[rel] = (
+                    "The previously selected Drive file is no longer at this path."
+                )
+            elif self.pair.direction == "up_only" and current.is_google_doc:
+                self._remote_scan_errors.append(
+                    "reviewed Google Workspace file cannot be a binary upload target"
+                )
+                self._path_conflict_candidates[rel] = {
+                    current.file_id: self._candidate_from_entry(current)
+                }
+                self._path_conflict_reasons[rel] = (
+                    "A native Google Workspace file cannot accept binary uploads."
+                )
+        report.remote_path_conflicts = self._path_conflicts(remote, set(local))
         if self._remote_scan_errors:
             self._remote_snapshot = None
-            for error in self._remote_scan_errors:
-                self._report_failure(report, f"remote traversal incomplete: {error}")
+            # Keep the validation counter, but do not log an indistinguishable
+            # line for every affected path. Names/IDs stay in structured UI
+            # data, rather than being disclosed in diagnostic logs.
+            for error, count in Counter(self._remote_scan_errors).items():
+                detail = f" ({count} checks)" if count > 1 else ""
+                self._report_failure(
+                    report, f"remote traversal incomplete: {error}{detail}",
+                    count=count,
+                )
             return report
 
+        report.blocked_before_transfers = False
         self._sync_directories(report)
         actions = reconcile(local, remote, last,
                             direction=self.pair.direction,
@@ -829,8 +913,8 @@ class TwoWaySyncEngine:
         return report
 
     @staticmethod
-    def _report_failure(report: SyncReport, message: str) -> None:
-        report.failed += 1
+    def _report_failure(report: SyncReport, message: str, *, count: int = 1) -> None:
+        report.failed += count
         report.errors.append(message)
         LOGGER.error("Sync failed: %s", message)
 
@@ -863,7 +947,7 @@ class TwoWaySyncEngine:
                         if rel not in self._local_dirs:
                             report.folders_reused += 1
                     else:
-                        local_dir.mkdir(parents=True)
+                        qa.mkdir(local_dir)
                         report.folders_created_local += 1
                     self._local_dirs.add(rel)
                 except Exception as exc:
@@ -944,6 +1028,9 @@ class TwoWaySyncEngine:
             remote_modified=R.modified, remote_md5=R.md5)
 
     def _apply(self, a: Action, local: dict, remote: dict, report: SyncReport):
+        qa.validate_pair(self.pair)
+        if qa.current_policy() and a.kind in {ActionKind.TRASH_LOCAL, ActionKind.TRASH_REMOTE}:
+            raise qa.QaSafetyError("QA safety stop: deletion is forbidden")
         rel = a.rel
         if a.kind == ActionKind.UPLOAD:
             L = local[rel]
@@ -1006,7 +1093,7 @@ class TwoWaySyncEngine:
             src = safe_local_path(self.local_root, rel)
             if src.exists():
                 dest = safe_local_path(self.local_root, f"{LOCAL_TRASH}/{rel}")
-                dest.parent.mkdir(parents=True, exist_ok=True)
+                qa.mkdir(dest.parent)
                 shutil.move(str(src), str(dest))
             local.pop(rel, None)
             self.db.delete_sync_item(self.pair_id, rel)
@@ -1031,6 +1118,9 @@ class TwoWaySyncEngine:
                 self._apply(Action(ActionKind.DOWNLOAD, rel), local, remote, report)
 
     def _apply_conflict(self, a: Action, local: dict, remote: dict, report: SyncReport):
+        qa.validate_pair(self.pair)
+        if qa.current_policy() and a.kind in {ActionKind.TRASH_LOCAL, ActionKind.TRASH_REMOTE}:
+            raise qa.QaSafetyError("QA safety stop: deletion is forbidden")
         rel = a.rel
         L, R = local[rel], remote[rel]
         canonical = safe_local_path(self.local_root, rel)
@@ -1059,8 +1149,8 @@ class TwoWaySyncEngine:
         else:
             # Local becomes a conflict copy; remote is downloaded/exported as
             # canonical.  This is always used for native Workspace documents.
-            conflict_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(canonical, conflict_path)
+            qa.mkdir(conflict_path.parent)
+            qa.copy_file(canonical, conflict_path)
             conflict_stat = conflict_path.stat()
             local[conflict_rel] = LocalEntry(
                 conflict_rel,
@@ -1068,9 +1158,10 @@ class TwoWaySyncEngine:
                 conflict_stat.st_size,
                 md5_file(conflict_path),
             )
-            self._apply(
-                Action(ActionKind.UPLOAD, conflict_rel), local, remote, report
-            )
+            if self.pair.direction != "down_only":
+                self._apply(
+                    Action(ActionKind.UPLOAD, conflict_rel), local, remote, report
+                )
             self._download_remote(R, canonical)
             st = canonical.stat()
             local[rel] = LocalEntry(

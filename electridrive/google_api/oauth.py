@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from electridrive.config import get_paths, selected_scopes
+from electridrive.qa_policy import current_policy, check_profile_file, _read
 
 LOGGER = logging.getLogger(__name__)
 SERVICE_NAME = "ElectriDrive Linux"
@@ -17,6 +18,8 @@ class OAuthError(RuntimeError):
 
 
 def _try_keyring_get() -> str | None:
+    if current_policy():
+        return None
     try:
         import keyring
         return keyring.get_password(SERVICE_NAME, TOKEN_KEY)
@@ -26,6 +29,8 @@ def _try_keyring_get() -> str | None:
 
 
 def _try_keyring_set(token_json: str) -> bool:
+    if current_policy():
+        return False
     try:
         import keyring
         keyring.set_password(SERVICE_NAME, TOKEN_KEY, token_json)
@@ -36,6 +41,13 @@ def _try_keyring_set(token_json: str) -> bool:
 
 
 def _load_token_from_file(path: Path) -> dict[str, Any] | None:
+    policy = current_policy()
+    if policy:
+        policy.verify()
+        if path != get_paths().token_fallback_file:
+            raise OAuthError("QA token path mismatch")
+        check_profile_file(path, strict=True)
+        return json.loads(_read(path)) if path.exists() else None
     if not path.exists():
         return None
     try:
@@ -46,6 +58,15 @@ def _load_token_from_file(path: Path) -> dict[str, Any] | None:
 
 
 def _save_token_to_file(path: Path, token_json: str) -> None:
+    policy = current_policy()
+    if policy:
+        policy.verify()
+        if path != get_paths().token_fallback_file:
+            raise OAuthError("QA token path mismatch")
+        check_profile_file(path, strict=True)
+        from electridrive.qa_policy import _write
+        _write(path, json.loads(token_json))
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token_json, encoding="utf-8")
     path.chmod(0o600)
@@ -64,6 +85,12 @@ def load_credentials():
     token_data = json.loads(token_json) if token_json else _load_token_from_file(paths.token_fallback_file)
     if not token_data:
         return None
+    if current_policy():
+        stored_scopes = token_data.get("scopes", [])
+        if isinstance(stored_scopes, str):
+            stored_scopes = stored_scopes.split()
+        if not stored_scopes or set(stored_scopes) - set(scopes):
+            raise OAuthError("QA requires a separately authorized drive.file token")
     return Credentials.from_authorized_user_info(token_data, scopes)
 
 
@@ -77,6 +104,11 @@ def save_credentials(creds) -> None:
 def clear_credentials() -> None:
     """Forget the saved token (keyring entry + fallback file). Used on sign-out and
     when switching access mode so the next connect re-consents with the new scope."""
+    if current_policy():
+        path = get_paths().token_fallback_file
+        check_profile_file(path, strict=True)
+        path.unlink(missing_ok=True)
+        return
     try:
         import keyring
         keyring.delete_password(SERVICE_NAME, TOKEN_KEY)
@@ -109,9 +141,12 @@ def authenticate_interactive():
 
     from electridrive.google_api import app_client
 
-    if paths.credentials_file.exists():
+    if paths.credentials_file.exists() or paths.credentials_file.is_symlink():
         # Power-user / self-host: a user-supplied Desktop OAuth client takes precedence.
-        flow = InstalledAppFlow.from_client_secrets_file(str(paths.credentials_file), scopes)
+        if current_policy():
+            flow = InstalledAppFlow.from_client_config(json.loads(_read(paths.credentials_file)), scopes)
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(str(paths.credentials_file), scopes)
     elif app_client.is_configured():
         # Global distribution: the built-in app client — no per-user credentials.json.
         flow = InstalledAppFlow.from_client_config(app_client.client_config(), scopes)

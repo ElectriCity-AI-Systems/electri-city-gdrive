@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,8 +45,13 @@ def plan_download(client, remote: RemoteFile, dest_dir: Path) -> list[DownloadIt
     Folders are walked recursively; Google Workspace docs are marked for export.
     `client` only needs `.list_folder(parent_id, page_token)` -> FileListing.
     """
+    qa.check_startup()
+    qa.require_local(dest_dir, exists=False)
+    client = qa.restrict_client(client)
+    if qa.current_policy():
+        remote = client.get_metadata(remote.id)
     dest_dir = Path(dest_dir).expanduser()
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    qa.mkdir(dest_dir)
     if dest_dir.is_symlink():
         raise ValueError(f"Download destination must not be a symlink: {dest_dir}")
     dest_dir = dest_dir.resolve()
@@ -68,12 +75,13 @@ def plan_download(client, remote: RemoteFile, dest_dir: Path) -> list[DownloadIt
     # Folder: create a subdirectory named after it and recurse.
     folder_dir = dest_dir / sanitize_name(remote.name)
     _reject_symlink_path(dest_dir, folder_dir)
-    folder_dir.mkdir(parents=True, exist_ok=True)
+    qa.mkdir(folder_dir)
     _walk_folder(client, remote.id, folder_dir, items, {remote.id})
     return items
 
 
 def _reject_symlink_path(root: Path, candidate: Path) -> None:
+    qa.require_local(candidate, exists=False)
     current = root
     for part in candidate.relative_to(root).parts:
         current /= part
@@ -90,6 +98,7 @@ def _walk_folder(
 ) -> None:
     page_token: str | None = None
     names: set[str] = set()
+    seen_pages: set[str] = set()
     while True:
         listing = client.list_folder(folder_id, page_token)
         for child in listing.files:
@@ -108,7 +117,7 @@ def _walk_folder(
                     raise ValueError(f"Remote folder cycle detected at {child.name!r}")
                 child_dir = folder_dir / safe_name
                 _reject_symlink_path(folder_dir, child_dir)
-                child_dir.mkdir(parents=True, exist_ok=True)
+                qa.mkdir(child_dir)
                 visited.add(child.id)
                 _walk_folder(client, child.id, child_dir, items, visited)
             else:
@@ -127,3 +136,6 @@ def _walk_folder(
         page_token = listing.next_page_token
         if not page_token:
             break
+        if page_token in seen_pages:
+            raise RuntimeError("Drive folder listing returned a repeated page token")
+        seen_pages.add(page_token)

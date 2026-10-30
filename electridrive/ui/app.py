@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
+from electridrive import qa_policy as qa
 from electridrive.logging_setup import configure_logging
 from electridrive.ui import icons
 from electridrive.ui.session import DriveSession
@@ -33,6 +34,8 @@ def create_app(argv=None) -> QApplication:
 
 
 def run_app() -> int:
+    sys.argv = [sys.argv[0], *qa.bootstrap_profile(sys.argv[1:])]
+    qa.check_startup()
     configure_logging()
     app = create_app()
     session = DriveSession()
