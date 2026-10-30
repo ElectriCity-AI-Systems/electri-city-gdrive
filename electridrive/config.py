@@ -7,6 +7,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from electridrive import qa_policy as qa
 
 LOGGER = logging.getLogger(__name__)
 _SETTINGS_LOCK = threading.RLock()
@@ -56,12 +57,20 @@ class AppPaths:
 
 
 def get_paths() -> AppPaths:
-    config_dir = xdg_config_home() / APP_ID
-    state_dir = xdg_state_home() / APP_ID
-    cache_dir = xdg_cache_home() / APP_ID
+    policy = qa.current_policy()
+    config_dir = policy.profile / "config" / APP_ID if policy else xdg_config_home() / APP_ID
+    state_dir = policy.profile / "state" / APP_ID if policy else xdg_state_home() / APP_ID
+    cache_dir = policy.profile / "cache" / APP_ID if policy else xdg_cache_home() / APP_ID
     vfs_cache_dir = cache_dir / "vfs"
     for path in (config_dir, state_dir, cache_dir, vfs_cache_dir):
+        if policy:
+            qa._no_links(path)
         path.mkdir(parents=True, exist_ok=True)
+    if policy:
+        for path in (config_dir / "credentials.json", config_dir / "token.json",
+                     config_dir / "app_client.json", config_dir / "settings.json",
+                     state_dir / "sync_state.sqlite3", state_dir / "electridrive.jsonl"):
+            qa.check_profile_file(path)
     return AppPaths(
         config_dir=config_dir,
         state_dir=state_dir,
@@ -89,6 +98,8 @@ def selected_scopes() -> list[str]:
 
         ELECTRIDRIVE_SCOPE=drive
     """
+    if qa.current_policy():
+        return [DEFAULT_SCOPE]
     env = os.environ.get("ELECTRIDRIVE_SCOPE")
     raw = (env if env is not None else _saved_scope()).strip().lower()
     if raw not in {"full", "drive"}:
@@ -168,15 +179,28 @@ def load_settings() -> Settings:
         if not path.exists():
             return Settings()
         try:
-            return Settings.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            raw = qa._read(path, strict=False) if qa.current_policy() else path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            qa.validate_settings_data(data)
+            settings = Settings.from_dict(data)
+            qa.validate_settings(settings)
+            return settings
+        except qa.QaSafetyError:
+            raise
         except Exception as exc:  # corrupt settings should never crash the app
+            if qa.current_policy():
+                raise qa.QaSafetyError("QA safety stop: malformed isolated settings") from exc
             LOGGER.warning("Could not read settings, using defaults: %s", exc)
             return Settings()
 
 
 def save_settings(settings: Settings) -> None:
+    qa.validate_settings(settings)
     path = get_paths().settings_file
     with _SETTINGS_LOCK:
+        if qa.current_policy():
+            qa._write(path, settings.to_dict())
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(

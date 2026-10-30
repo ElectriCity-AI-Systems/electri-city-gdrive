@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from electridrive import qa_policy as qa
 from electridrive.config import SyncPair
 from electridrive.sync.twoway import SyncReport
 from electridrive.ui import icons
@@ -220,12 +221,15 @@ class SyncView(QWidget):
         # Disabled pairs must stay inert even when called programmatically.
         if self._sync_busy or not pair.enabled or not self._session.client:
             return
+        if not self._validate_qa(pair):
+            return
         self._sync_busy = True
         self._active_pair_ids = {id(pair)}
         self._reload()
 
         def work():
             from electridrive.sync.twoway import TwoWaySyncEngine
+            qa.validate_pair(pair)
             return TwoWaySyncEngine(self._session.client, self._session.db, pair).run()
 
         def done(report):
@@ -250,6 +254,8 @@ class SyncView(QWidget):
     def _sync_all(self, btn: QPushButton):
         if self._sync_busy or not self._session.client:
             return
+        if any(not self._validate_qa(p) for p in self._session.settings.sync_pairs):
+            return
         self._sync_busy = True
         self._active_pair_ids = {id(p) for p in self._session.settings.sync_pairs if p.enabled}
         btn.setText("Syncing all…")
@@ -258,6 +264,7 @@ class SyncView(QWidget):
         def work():
             from electridrive.sync.runner import run_configured_pairs
 
+            qa.validate_settings(self._session.settings)
             return run_configured_pairs(
                 self._session.client,
                 self._session.db,
@@ -331,14 +338,40 @@ class SyncView(QWidget):
                 "No Drive files were changed. A separate Sync now is required.",
             )
 
+    def _validate_qa(self, pair):
+        try:
+            qa.validate_pair(pair)
+            return True
+        except qa.QaSafetyError as exc:
+            show_readable_warning(self, self._p, "QA safety stop", str(exc))
+            return False
+
     def _add_pair(self):
-        local = QFileDialog.getExistingDirectory(self, "Choose local folder", str(Path.home()))
+        policy = qa.current_policy()
+        local = QFileDialog.getExistingDirectory(
+            self, "Choose synthetic QA folder" if policy else "Choose local folder",
+            str(policy.local_root if policy else Path.home()))
         if not local:
             return
-        remote, ok = QInputDialog.getText(self, "Remote Drive folder",
-                                          "Drive folder path:",
-                                          text=self._session.settings.default_remote_folder
-                                          + "/" + Path(local).name)
+        if policy:
+            try:
+                policy.local(local)
+            except qa.QaSafetyError as exc:
+                show_readable_warning(self, self._p, "QA safety stop", str(exc))
+                return
+            choices = ["qa:" + rid for rid in policy.remote_ids]
+            if not choices:
+                show_readable_information(self, self._p, "No registered QA cloud roots",
+                    "Close this QA window first. Explicitly create a synthetic root with: "
+                    "electridrive qa-create-folder --name NAME --qa-profile PROFILE. "
+                    "Then restart the GUI with the same QA profile to use the registered root.")
+                return
+            remote, ok = QInputDialog.getItem(self, "Registered QA cloud root",
+                "Choose an explicit QA root ID:", choices, 0, False)
+        else:
+            remote, ok = QInputDialog.getText(self, "Remote Drive folder",
+                "Drive folder path:", text=self._session.settings.default_remote_folder
+                + "/" + Path(local).name)
         if not ok or not remote.strip():
             return
         direction, ok = QInputDialog.getItem(
@@ -358,7 +391,8 @@ class SyncView(QWidget):
         # to personal Drive data, including when Sync all is clicked.
         self._session.settings.sync_pairs.append(
             SyncPair(local_path=local, remote_folder=remote.strip(),
-                     direction=direction, enabled=False))
+                     direction=direction, enabled=False,
+                     delete_policy="off" if policy else "trash"))
         self._session.save()
         self._reload()
 
@@ -387,6 +421,8 @@ class SyncView(QWidget):
             return
         pair = pairs[index]
         if not pair.enabled:
+            if not self._validate_qa(pair):
+                return
             if self._sync_busy:
                 show_readable_warning(
                     self, self._p, "Sync in progress",

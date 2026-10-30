@@ -1,6 +1,8 @@
 """Sequential runner for every enabled user-configured sync pair."""
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import logging
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -37,7 +39,11 @@ def run_configured_pairs(
     log_cb=None,
 ) -> ConfiguredSyncReport:
     """Run all enabled pairs, continuing after every pair-level failure."""
+    qa.check_startup()
     configured = list(pairs)
+    for pair in configured:
+        qa.validate_pair(pair)
+    client = qa.restrict_client(client)
     aggregate = ConfiguredSyncReport(configured_pairs=len(configured))
     for index, pair in enumerate(configured, start=1):
         if not pair.enabled:

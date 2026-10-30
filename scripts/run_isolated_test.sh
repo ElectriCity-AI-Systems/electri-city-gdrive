@@ -10,6 +10,7 @@ fi
 profile="$(mktemp -d "${TMPDIR:-/tmp}/electridrive-qa.XXXXXXXX")"
 chmod 700 "$profile"
 mkdir -m 700 "$profile"/{home,config,state,cache,data}
+synthetic_root="$(mktemp -d "${TMPDIR:-/tmp}/electridrive-synthetic.XXXXXXXX")"
 # Do not inherit OAuth, scope or license overrides from the ordinary session.
 for name in $(compgen -e); do
     if [[ "$name" == ELECTRIDRIVE_* ]]; then unset "$name"; fi
@@ -19,4 +20,5 @@ export XDG_CONFIG_HOME="$profile/config" XDG_STATE_HOME="$profile/state"
 export XDG_CACHE_HOME="$profile/cache" XDG_DATA_HOME="$profile/data"
 export PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring PYTHONNOUSERSITE=1
 printf 'Isolated ElectriDrive QA profile: %s\n' "$profile"
-exec "$PY" app.py "$@"
+"$PY" -m electridrive.cli qa-init --profile "$profile" --local-root "$synthetic_root"
+exec "$PY" app.py --qa-profile "$profile" "$@"

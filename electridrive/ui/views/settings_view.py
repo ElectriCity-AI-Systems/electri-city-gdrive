@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from electridrive import licensing
+from electridrive import licensing, qa_policy as qa
 from electridrive.config import APP_VERSION, PRO_COMPARE, PRO_PRICE, selected_scopes
 from electridrive.ui import icons
 from electridrive.ui.theme import Palette
@@ -164,11 +164,16 @@ class SettingsView(QWidget):
         self._mode_combo.addItem("Full Drive (Pro)", "drive")
         self._mode_combo.setCurrentIndex(max(0, self._mode_combo.findData(self._session.settings.scope)))
         self._mode_combo.activated.connect(lambda: self._change_mode(self._mode_combo.currentData()))
+        if qa.current_policy():
+            self._mode_combo.setEnabled(False)
+            self._mode_combo.setToolTip("QA mode requires isolated per-file access; Full Drive is unavailable.")
         mode_row.addWidget(self._mode_combo)
         card.v.addLayout(mode_row)
 
         note = QLabel("Full Drive needs ElectriDrive Pro (or your own Google-verified OAuth "
                       "client). Switching signs you out so you can re-consent.")
+        if qa.current_policy():
+            note.setText("QA mode uses isolated per-file access only. Full Drive is disabled, including with Pro or custom OAuth credentials.")
         note.setWordWrap(True)
         note.setProperty("role", "muted")
         note.setStyleSheet("font-size: 12px;")
@@ -201,6 +206,9 @@ class SettingsView(QWidget):
                                 "contact support with your donation reference.")
 
     def _change_mode(self, mode: str):
+        if qa.current_policy() and mode != "file":
+            self._mode_combo.setCurrentIndex(self._mode_combo.findData("file"))
+            return
         if mode == self._session.settings.scope:
             return
         if mode == "drive" and not (self._is_pro() or self._session.has_credentials()):

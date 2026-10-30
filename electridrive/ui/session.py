@@ -4,6 +4,7 @@ import logging
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
+from electridrive import qa_policy as qa
 from electridrive.config import Settings, get_paths, load_settings, save_settings
 from electridrive.storage.database import SyncDatabase
 
@@ -26,6 +27,7 @@ class _Worker(QRunnable):
     @Slot()
     def run(self):
         try:
+            qa.check_startup()
             result = self._fn(*self._args, **self._kwargs)
         except Exception as exc:  # surfaced to the UI via the error signal
             LOGGER.exception("Background task failed")
@@ -48,6 +50,7 @@ class DriveSession(QObject):
 
     def __init__(self):
         super().__init__()
+        qa.check_startup()
         self.paths = get_paths()
         self.settings: Settings = load_settings()
         self.db = SyncDatabase(self.paths.database_file)
@@ -86,6 +89,7 @@ class DriveSession(QObject):
         self.pool.start(worker)
 
     def save(self):
+        qa.validate_settings(self.settings)
         save_settings(self.settings)
 
     # ------------------------------------------------------------------ connect
@@ -96,7 +100,7 @@ class DriveSession(QObject):
     def _do_connect(self):
         from electridrive.google_api.client import GoogleDriveClient
 
-        client = GoogleDriveClient()  # triggers OAuth (or refresh) as needed
+        client = qa.restrict_client(GoogleDriveClient())  # triggers OAuth (or refresh) as needed
         about = client.get_about()
         return client, about
 
@@ -126,7 +130,7 @@ class DriveSession(QObject):
         from electridrive.transfers import TransferManager
 
         old = self.transfers
-        self.client = GoogleDriveClient()
+        self.client = qa.restrict_client(GoogleDriveClient())
         self.transfers = TransferManager(
             self.client,
             on_update=lambda t: self.transfer_changed.emit(t),
@@ -138,6 +142,8 @@ class DriveSession(QObject):
     def set_access_mode(self, mode: str):
         """Switch between 'file' (drive.file) and 'drive' (Pro/full). Clears the saved
         token so the next connect re-consents with the new scope."""
+        if qa.current_policy() and mode != "file":
+            raise qa.QaSafetyError("QA safety: only per-file access is supported")
         from electridrive.google_api.oauth import clear_credentials
 
         self.settings.scope = mode
@@ -149,6 +155,8 @@ class DriveSession(QObject):
     def pick_from_drive(self, on_done=None, on_error=None):
         """Open the desktop Drive Picker (in a worker thread), then refresh access."""
         def work():
+            if qa.current_policy():
+                raise qa.QaSafetyError("QA safety: Drive Picker is disabled; use registered QA roots")
             from electridrive.google_api.picker import pick_from_drive as _pick
             return _pick()
 

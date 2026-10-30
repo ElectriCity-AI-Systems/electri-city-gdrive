@@ -21,7 +21,7 @@ ProgressCB = Callable[[int, int], None]  # (bytes_done, total_bytes)
 # Fields requested for every file listing. Kept in one place so all calls agree.
 _FILE_FIELDS = (
     "id, name, mimeType, size, modifiedTime, parents, trashed, starred, "
-    "md5Checksum, webViewLink, iconLink"
+    "md5Checksum, webViewLink, iconLink, appProperties"
 )
 
 # Google Workspace docs are not real binary files; they must be exported.
@@ -46,6 +46,12 @@ DEFAULT_EXPORT: tuple[str, str] = ("application/pdf", ".pdf")
 @contextmanager
 def _atomic_download_file(destination: Path) -> Iterator[BinaryIO]:
     """Keep the destination intact until all bytes and progress callbacks succeed."""
+    from electridrive.qa_policy import current_policy
+    policy = current_policy()
+    if policy:
+        with policy.atomic_writer(destination) as handle:
+            yield handle
+        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = stat.S_IMODE(destination.stat().st_mode)
@@ -92,6 +98,7 @@ class RemoteFile:
     md5_checksum: str | None = None
     web_view_link: str | None = None
     icon_link: str | None = None
+    app_properties: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_folder(self) -> bool:
@@ -120,6 +127,7 @@ class RemoteFile:
             md5_checksum=item.get("md5Checksum"),
             web_view_link=item.get("webViewLink"),
             icon_link=item.get("iconLink"),
+            app_properties=dict(item.get("appProperties") or {}),
         )
 
 
@@ -173,7 +181,30 @@ class GoogleDriveClient:
     optional dependencies installed (keeps the core test-able / headless).
     """
 
+    def __getattribute__(self, name):
+        if not name.startswith("_"):
+            from electridrive.qa_policy import current_policy, QaSafetyError
+            policy = current_policy()
+            if policy and object.__getattribute__(self, "__dict__").get("_qa_profile") != str(policy.profile):
+                raise QaSafetyError("QA safety stop: pre-existing ordinary Google client forbidden")
+        return object.__getattribute__(self, name)
+
+    def __new__(cls, service=None, credentials=None):
+        from electridrive.qa_policy import current_policy, QaSafetyError
+        policy = current_policy()
+        if policy:
+            if service is not None or credentials is not None:
+                raise QaSafetyError("QA safety stop: injected Google credentials/service forbidden")
+            raw = object.__new__(cls)
+            raw.__init__()
+            from electridrive.qa_drive import QaDriveClient
+            return QaDriveClient(raw, policy)
+        return object.__new__(cls)
+
     def __init__(self, service=None, credentials=None):
+        from electridrive.qa_policy import current_policy
+        policy = current_policy()
+        self._qa_profile = str(policy.profile) if policy else None
         # httplib2 (and the built service) are NOT thread-safe. The UI uses a thread
         # pool and the transfer manager has its own worker threads, so each thread gets
         # its own service built from shared credentials (see the `service` property).
@@ -225,6 +256,11 @@ class GoogleDriveClient:
             metadata["parents"] = [parent_id]
         created = self.service.files().create(body=metadata, fields="id").execute()
         return created["id"]
+
+    def _create_qa_folder(self, name, nonce):
+        item = self.service.files().create(body={"name": name, "mimeType": DRIVE_FOLDER_MIME,
+            "appProperties": {"electridrive_qa_nonce": nonce}}, fields=_FILE_FIELDS).execute()
+        return RemoteFile.from_api(item)
 
     def find_file(self, name: str, parent_id: str) -> str | None:
         """Return an existing non-Workspace file with this exact parent/name.
@@ -358,6 +394,22 @@ class GoogleDriveClient:
         remote_name: str,
         progress_cb: ProgressCB | None = None,
     ) -> str:
+        from electridrive.qa_policy import current_policy
+        policy = current_policy()
+        if policy:
+            from googleapiclient.http import MediaIoBaseUpload
+            with policy.source(local_file) as source:
+                total = os.fstat(source.fileno()).st_size
+                media = MediaIoBaseUpload(source, mimetype="application/octet-stream", resumable=True)
+                request = self.service.files().create(body={"name": remote_name, "parents": [parent_id]}, media_body=media, fields="id")
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status and progress_cb:
+                        progress_cb(int(status.resumable_progress), total)
+                if progress_cb:
+                    progress_cb(total, total)
+                return response["id"]
         try:
             from googleapiclient.http import MediaFileUpload
         except Exception as exc:  # pragma: no cover
@@ -390,6 +442,22 @@ class GoogleDriveClient:
         Parents are deliberately omitted from the update metadata, so an update
         cannot accidentally move the canonical file to another folder.
         """
+        from electridrive.qa_policy import current_policy
+        policy = current_policy()
+        if policy:
+            from googleapiclient.http import MediaIoBaseUpload
+            with policy.source(local_file) as source:
+                total = os.fstat(source.fileno()).st_size
+                media = MediaIoBaseUpload(source, mimetype="application/octet-stream", resumable=True)
+                request = self.service.files().update(fileId=file_id, body={"name": remote_name} if remote_name is not None else {}, media_body=media, fields="id")
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status and progress_cb:
+                        progress_cb(int(status.resumable_progress), total)
+                if progress_cb:
+                    progress_cb(total, total)
+                return response["id"]
         try:
             from googleapiclient.http import MediaFileUpload
         except Exception as exc:  # pragma: no cover
@@ -427,7 +495,9 @@ class GoogleDriveClient:
             ) from exc
 
         dest_path = Path(dest_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        from electridrive.qa_policy import current_policy
+        if not current_policy():
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
         request = self.service.files().get_media(fileId=file_id)
         with _atomic_download_file(dest_path) as handle:
             downloader = MediaIoBaseDownload(handle, request)
@@ -457,7 +527,9 @@ class GoogleDriveClient:
             meta = self.get_metadata(file_id)
             mime_type, _ext = export_format_for(meta.mime_type)
         dest_path = Path(dest_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        from electridrive.qa_policy import current_policy
+        if not current_policy():
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
         request = self.service.files().export_media(fileId=file_id, mimeType=mime_type)
         with _atomic_download_file(dest_path) as handle:
             downloader = MediaIoBaseDownload(handle, request)

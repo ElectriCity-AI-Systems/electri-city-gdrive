@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import logging
 import platform
+import sys
+
+from electridrive import qa_policy as qa
 from pathlib import Path
 
 from electridrive.config import SyncPair, get_paths, load_settings, selected_scopes
@@ -32,7 +35,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    client = GoogleDriveClient()
+    client = qa.restrict_client(GoogleDriveClient())
     files = client.list_files(limit=args.limit)
     for item in files:
         print(f"{item.id}\t{item.name}\t{item.mime_type or ''}\t{item.size or ''}")
@@ -40,6 +43,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_sync_up(args: argparse.Namespace) -> int:
+    qa.validate_pair(SyncPair(local_path=str(Path(args.local_folder).expanduser()),
+                              remote_folder=args.remote_folder, direction="up_only", delete_policy="off"))
     paths = get_paths()
     db = SyncDatabase(paths.database_file)
     try:
@@ -61,7 +66,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     db = SyncDatabase(paths.database_file)
     try:
         pair = SyncPair(local_path=str(Path(args.local_folder).expanduser()),
-                        remote_folder=args.remote_folder, direction=args.direction)
+                        remote_folder=args.remote_folder, direction=args.direction,
+                        delete_policy="off" if qa.current_policy() else "trash")
+        qa.validate_pair(pair)
         engine = TwoWaySyncEngine(GoogleDriveClient(), db, pair, log_cb=print)
         report = engine.run()
         print(f"Done. up={report.uploaded} down={report.downloaded} "
@@ -96,7 +103,8 @@ def cmd_sync_configured(args: argparse.Namespace) -> int:
 
 
 def cmd_download(args: argparse.Namespace) -> int:
-    client = GoogleDriveClient()
+    qa.require_local(Path(args.dest).expanduser(), exists=False)
+    client = qa.restrict_client(GoogleDriveClient())
     remote = client.get_metadata(args.file_id)
     dest = Path(args.dest).expanduser()
     items = plan_download(client, remote, dest)
@@ -115,6 +123,9 @@ def cmd_download(args: argparse.Namespace) -> int:
 
 
 def cmd_mount(args: argparse.Namespace) -> int:
+    if qa.current_policy():
+        print("QA safety: Virtual Drive/FUSE is disabled.")
+        return 2
     from electridrive.vfs import FuseMount, fuse_available
 
     if getattr(args, "writable", False):
@@ -154,6 +165,14 @@ def cmd_unmount(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="electridrive", description="ElectriDrive — Electric-City Drive for Linux")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("qa-init", help="Seal an empty synthetic QA profile")
+    p_init.add_argument("--profile", required=True)
+    p_init.add_argument("--local-root", required=True)
+    p_init.set_defaults(func=cmd_qa_init)
+    p_create = sub.add_parser("qa-create-folder", help="Explicitly create a new synthetic cloud root")
+    p_create.add_argument("--name", required=True)
+    p_create.set_defaults(func=cmd_qa_create_folder)
 
     sub.add_parser("doctor", help="Show local configuration status").set_defaults(func=cmd_doctor)
 
@@ -196,11 +215,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def cmd_qa_init(args):
+    policy = qa.initialize(args.profile, args.local_root)
+    print(f"QA profile initialized: {policy.profile}")
+    return 0
+
+
+def cmd_qa_create_folder(args):
+    if not qa.current_policy():
+        raise qa.QaSafetyError("QA safety stop: select --qa-profile first")
+    print(GoogleDriveClient().create_qa_root(args.name))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    configure_logging()
-    parser = build_parser()
-    args = parser.parse_args(argv)
     try:
+        arguments = list(sys.argv[1:] if argv is None else argv)
+        # Initialization must not discover or write ordinary settings/log files.
+        if arguments and arguments[0] == "qa-init":
+            args = build_parser().parse_args(arguments)
+            return int(args.func(args))
+        arguments = qa.bootstrap_profile(arguments)
+        args = build_parser().parse_args(arguments)
+        qa.check_startup()
+        configure_logging()
         return int(args.func(args))
     except KeyboardInterrupt:
         print("Cancelled")

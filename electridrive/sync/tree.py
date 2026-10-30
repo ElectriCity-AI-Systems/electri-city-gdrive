@@ -1,7 +1,8 @@
 """Safe, deterministic local-tree inventory helpers for selected sync roots."""
 from __future__ import annotations
 
-import os
+from electridrive import qa_policy as qa
+
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -27,9 +28,13 @@ class LocalTree:
 
 def canonical_sync_root(root: Path, *, create: bool = False) -> Path:
     """Resolve the explicitly selected root, optionally creating the root itself."""
+    qa.require_local(root, exists=not create)
     requested = Path(root).expanduser()
     if create:
-        requested.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if qa.current_policy():
+            qa.mkdir(requested)
+        else:
+            requested.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         resolved = requested.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -55,54 +60,54 @@ def scan_local_tree(root: Path, rules: SyncRules | None = None) -> LocalTree:
 
     def walk(current: Path) -> None:
         try:
-            with os.scandir(current) as iterator:
+            with qa.scandir(current) as iterator:
                 entries = sorted(iterator, key=lambda item: (item.name.casefold(), item.name))
+                for entry in entries:
+                    path = current / entry.name
+                    qa.require_local(path)
+                    rel = path.relative_to(canonical).as_posix()
+                    try:
+                        if entry.is_symlink():
+                            if rules.fail_on_unsupported:
+                                errors.append(
+                                    f"unsupported symlink {rel}: full backup cannot preserve "
+                                    "a symlink without changing its meaning"
+                                )
+                            else:
+                                excluded.append(rel)
+                            continue
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        is_file = entry.is_file(follow_symlinks=False)
+                        if not is_dir and not is_file:
+                            if rules.fail_on_unsupported:
+                                errors.append(
+                                    f"unsupported filesystem entry {rel}: not a regular file or directory"
+                                )
+                            else:
+                                excluded.append(rel)
+                            continue
+                        size = entry.stat(follow_symlinks=False).st_size if is_file else None
+                    except OSError as exc:
+                        errors.append(f"cannot inspect {rel}: {type(exc).__name__}")
+                        continue
+
+                    if rules.is_excluded(
+                        path,
+                        canonical,
+                        is_file=is_file,
+                        size=size,
+                    ):
+                        excluded.append(rel)
+                        continue
+                    if is_dir:
+                        directories.append(path)
+                        walk(path)
+                    else:
+                        files.append(path)
         except OSError as exc:
             rel = current.relative_to(canonical).as_posix() or "."
             errors.append(f"cannot scan {rel}: {type(exc).__name__}")
             return
-
-        for entry in entries:
-            path = Path(entry.path)
-            rel = path.relative_to(canonical).as_posix()
-            try:
-                if entry.is_symlink():
-                    if rules.fail_on_unsupported:
-                        errors.append(
-                            f"unsupported symlink {rel}: full backup cannot preserve "
-                            "a symlink without changing its meaning"
-                        )
-                    else:
-                        excluded.append(rel)
-                    continue
-                is_dir = entry.is_dir(follow_symlinks=False)
-                is_file = entry.is_file(follow_symlinks=False)
-                if not is_dir and not is_file:
-                    if rules.fail_on_unsupported:
-                        errors.append(
-                            f"unsupported filesystem entry {rel}: not a regular file or directory"
-                        )
-                    else:
-                        excluded.append(rel)
-                    continue
-                size = entry.stat(follow_symlinks=False).st_size if is_file else None
-            except OSError as exc:
-                errors.append(f"cannot inspect {rel}: {type(exc).__name__}")
-                continue
-
-            if rules.is_excluded(
-                path,
-                canonical,
-                is_file=is_file,
-                size=size,
-            ):
-                excluded.append(rel)
-                continue
-            if is_dir:
-                directories.append(path)
-                walk(path)
-            else:
-                files.append(path)
 
     walk(canonical)
     return LocalTree(
@@ -128,4 +133,5 @@ def safe_local_path(root: Path, relative_path: str) -> Path:
         candidate = candidate / part
         if candidate.is_symlink():
             raise ValueError(f"Refusing to traverse symlink in selected root: {relative_path}")
+    qa.require_local(candidate, exists=False)
     return candidate

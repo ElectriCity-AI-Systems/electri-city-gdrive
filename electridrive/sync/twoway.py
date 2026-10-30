@@ -15,6 +15,8 @@ Safety guarantees:
 """
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import hashlib
 import logging
 import shutil
@@ -292,7 +294,9 @@ def _conflict_name(rel: str) -> str:
 class TwoWaySyncEngine:
     def __init__(self, client, db, pair, rules: SyncRules | None = None,
                  log_cb=None):
-        self.client = client
+        qa.check_startup()
+        qa.validate_pair(pair)
+        self.client = qa.restrict_client(client)
         self.db = db
         self.pair = pair
         # Full backup is the default for configured sync pairs, including
@@ -348,6 +352,8 @@ class TwoWaySyncEngine:
 
     # ------------------------------------------------------------- snapshots
     def scan_local(self) -> dict[str, LocalEntry]:
+        qa.check_startup()
+        qa.validate_pair(self.pair)
         out: dict[str, LocalEntry] = {}
         tree = scan_local_tree(self.local_root, self.rules)
         self.local_root = tree.root
@@ -371,6 +377,9 @@ class TwoWaySyncEngine:
         return out
 
     def scan_remote(self) -> dict[str, RemoteEntry]:
+        qa.check_startup()
+        qa.validate_pair(self.pair)
+        self.client = qa.restrict_client(self.client)
         # A failed root lookup must not expose candidates from a previous run.
         self._dir_ids = {}
         self._remote_dirs = set()
@@ -381,7 +390,9 @@ class TwoWaySyncEngine:
         self._dir_candidates = {}
         self._duplicate_file_paths = set()
         self._remote_excluded = 0
-        if self.pair.direction == "down_only":
+        if qa.current_policy():
+            root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+        elif self.pair.direction == "down_only":
             # Resolving a download source must be read-only. A typo, moved
             # folder or revoked access is not authority to create cloud data.
             root_id = "root"
@@ -751,6 +762,9 @@ class TwoWaySyncEngine:
 
     # --------------------------------------------------------------- execute
     def run(self) -> SyncReport:
+        qa.check_startup()
+        qa.validate_pair(self.pair)
+        self.client = qa.restrict_client(self.client)
         report = SyncReport(blocked_before_transfers=True)
         if self.pair.direction not in {"two_way", "up_only", "down_only"}:
             self._report_failure(
@@ -766,7 +780,10 @@ class TwoWaySyncEngine:
         try:
             requested_root = Path(self.pair.local_path).expanduser()
             if self.pair.direction == "down_only" and not requested_root.exists():
-                requested_root.mkdir(mode=0o700, parents=True)
+                if qa.current_policy():
+                    qa.mkdir(requested_root)
+                else:
+                    requested_root.mkdir(mode=0o700, parents=True)
             self.local_root = canonical_sync_root(requested_root)
             local = self.scan_local()
         except Exception as exc:
@@ -930,7 +947,7 @@ class TwoWaySyncEngine:
                         if rel not in self._local_dirs:
                             report.folders_reused += 1
                     else:
-                        local_dir.mkdir(parents=True)
+                        qa.mkdir(local_dir)
                         report.folders_created_local += 1
                     self._local_dirs.add(rel)
                 except Exception as exc:
@@ -1011,6 +1028,9 @@ class TwoWaySyncEngine:
             remote_modified=R.modified, remote_md5=R.md5)
 
     def _apply(self, a: Action, local: dict, remote: dict, report: SyncReport):
+        qa.validate_pair(self.pair)
+        if qa.current_policy() and a.kind in {ActionKind.TRASH_LOCAL, ActionKind.TRASH_REMOTE}:
+            raise qa.QaSafetyError("QA safety stop: deletion is forbidden")
         rel = a.rel
         if a.kind == ActionKind.UPLOAD:
             L = local[rel]
@@ -1073,7 +1093,7 @@ class TwoWaySyncEngine:
             src = safe_local_path(self.local_root, rel)
             if src.exists():
                 dest = safe_local_path(self.local_root, f"{LOCAL_TRASH}/{rel}")
-                dest.parent.mkdir(parents=True, exist_ok=True)
+                qa.mkdir(dest.parent)
                 shutil.move(str(src), str(dest))
             local.pop(rel, None)
             self.db.delete_sync_item(self.pair_id, rel)
@@ -1098,6 +1118,9 @@ class TwoWaySyncEngine:
                 self._apply(Action(ActionKind.DOWNLOAD, rel), local, remote, report)
 
     def _apply_conflict(self, a: Action, local: dict, remote: dict, report: SyncReport):
+        qa.validate_pair(self.pair)
+        if qa.current_policy() and a.kind in {ActionKind.TRASH_LOCAL, ActionKind.TRASH_REMOTE}:
+            raise qa.QaSafetyError("QA safety stop: deletion is forbidden")
         rel = a.rel
         L, R = local[rel], remote[rel]
         canonical = safe_local_path(self.local_root, rel)
@@ -1126,8 +1149,8 @@ class TwoWaySyncEngine:
         else:
             # Local becomes a conflict copy; remote is downloaded/exported as
             # canonical.  This is always used for native Workspace documents.
-            conflict_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(canonical, conflict_path)
+            qa.mkdir(conflict_path.parent)
+            qa.copy_file(canonical, conflict_path)
             conflict_stat = conflict_path.stat()
             local[conflict_rel] = LocalEntry(
                 conflict_rel,
