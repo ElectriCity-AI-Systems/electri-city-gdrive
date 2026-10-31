@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import hmac
 import time
 import webbrowser
 
@@ -85,7 +86,24 @@ _SUCCESS_HTML = (
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
-        self.server.captured = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+        # An unrelated browser request, duplicate parameter or forged callback
+        # must never be accepted as the OAuth response.
+        parsed = urlparse(self.path)
+        if parsed.path != "/":
+            self.send_error(404)
+            return
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        state_values = params.get("state", [])
+        expected = getattr(self.server, "expected_state", None)
+        if (not isinstance(expected, str) or not expected
+                or len(state_values) != 1
+                or not hmac.compare_digest(
+                    state_values[0].encode("utf-8"), expected.encode("utf-8")
+                )
+                or any(len(values) != 1 for values in params.values())):
+            self.send_error(400, "Invalid OAuth callback")
+            return
+        self.server.captured = {key: values[0] for key, values in params.items()}
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
@@ -106,6 +124,8 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
 
     if not app_client.is_configured():
         raise PickerError("No OAuth client configured for the Picker.")
+    if not app_client.is_picker_configured():
+        raise PickerError("No Google Picker API key configured for this build.")
 
     httpd = HTTPServer(("127.0.0.1", 0), _Handler)
     httpd.captured = None
@@ -115,8 +135,13 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
     flow = Flow.from_client_config(
         app_client.client_config(), scopes=[DEFAULT_SCOPE], autogenerate_code_verifier=True
     )
-    flow.redirect_uri = f"http://localhost:{port}/"
+    # Match the actual IPv4-only listener: localhost may resolve to ::1 first.
+    flow.redirect_uri = f"http://127.0.0.1:{port}/"
     auth_url, state = flow.authorization_url(**picker_auth_params(allow_folders))
+    if not isinstance(state, str) or not state:
+        httpd.server_close()
+        raise PickerError("OAuth flow did not provide a valid callback state")
+    httpd.expected_state = state
 
     LOGGER.info("Opening Drive Picker in browser")
     webbrowser.open(auth_url)
@@ -130,8 +155,8 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
 
     if httpd.captured is None:
         raise PickerError("Timed out waiting for Drive Picker selection")
-    if httpd.captured.get("state") and httpd.captured["state"] != state:
-        raise PickerError("State mismatch in Picker redirect")
+    if httpd.captured.get("state") != state:
+        raise PickerError("Missing or invalid OAuth state in Picker redirect")
 
     code, file_ids = extract_pick_result(httpd.captured)
     flow.fetch_token(code=code)

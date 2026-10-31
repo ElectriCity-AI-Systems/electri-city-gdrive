@@ -129,9 +129,10 @@ class LoginView(QWidget):
         else:
             cfg = self._session.paths.config_dir
             self.status.setText(
-                "First-time setup: add a Google OAuth Desktop client (Drive API + Picker "
-                "API enabled). Set ELECTRIDRIVE_CLIENT_ID, or drop client JSON at "
-                f"{cfg / 'app_client.json'} (or your own credentials.json)."
+                "Google Drive connection is unavailable because this build has no valid "
+                "publisher-configured OAuth Desktop client. Contact the publisher for a "
+                "customer candidate. For self-built copies, add a client JSON at "
+                f"{cfg / 'app_client.json'}."
             )
             if qa.current_policy():
                 self.status.setText(
