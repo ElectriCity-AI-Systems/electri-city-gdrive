@@ -51,7 +51,7 @@ def test_change_feed_failure_falls_back_to_complete_inventory(tmp_path, failure)
     assert (root / 'b').read_bytes() == b'new'
 
 
-def test_changes_during_full_scan_are_seen_on_next_cycle(tmp_path):
+def test_changes_during_full_scan_are_rescanned_before_current_actions(tmp_path):
     root, drive, folder, pair, db = environment(tmp_path)
     original = drive.list_folder
     token = {'generation': 0}
@@ -67,9 +67,9 @@ def test_changes_during_full_scan_are_seen_on_next_cycle(tmp_path):
             token['generation'] = 1
         return result
     drive.list_folder = during_scan
-    assert TwoWaySyncEngine(drive, db, pair).run().downloaded == 1
+    assert TwoWaySyncEngine(drive, db, pair).run().downloaded == 2
     drive.list_folder = original
-    assert TwoWaySyncEngine(drive, db, pair).run().downloaded == 1
+    assert TwoWaySyncEngine(drive, db, pair).run().downloaded == 0
     assert (root / 'late').read_bytes() == b'created during scan'
 
 
@@ -122,11 +122,14 @@ def test_paginated_empty_change_feed_avoids_full_listing(tmp_path):
 def test_change_on_later_feed_page_forces_complete_inventory(tmp_path):
     root, drive, folder, pair, db = environment(tmp_path)
     TwoWaySyncEngine(drive, db, pair).run()
+    previous_token = drive.get_start_page_token()
     drive.add_file('b', b'new', folder)
     def pages(token):
         if token == 'second-page':
             return [RemoteChange('b', False)], None, 'final-token'
-        return [], 'second-page', None
+        if token == previous_token:
+            return [], 'second-page', None
+        return [], None, token
     drive.list_changes = pages
     assert TwoWaySyncEngine(drive, db, pair).run().downloaded == 1
 
@@ -179,3 +182,56 @@ def test_own_remote_mutation_invalidates_pre_action_snapshot(tmp_path):
     assert listings
     assert report.trashed_local == report.trashed_remote == 0
     assert (root / 'b').read_bytes() == b'local upload'
+
+
+def test_remote_edit_during_inventory_is_preserved_before_local_upload(tmp_path):
+    root, drive, folder, pair, db = environment(tmp_path)
+    engine = TwoWaySyncEngine(drive, db, pair)
+    assert engine.run().downloaded == 1
+    fid = drive.find_file('a', folder)
+    (root / 'a').write_bytes(b'LOCAL EDIT')
+    drive.add_file('force-inventory', b'unrelated', folder)
+    listing = drive.list_folder
+    edited = False
+
+    def concurrent_edit(parent, page=None):
+        nonlocal edited
+        result = listing(parent, page)
+        if not edited:
+            edited = True
+            drive.modify_file(fid, b'UNIQUE REMOTE EDIT', modified='2099-01-01T00:00:00Z')
+        return result
+
+    drive.list_folder = concurrent_edit
+    report = engine.run()
+    assert report.failed == 0
+    assert report.conflicts == 1
+    assert drive.nodes[fid]['content'] == b'UNIQUE REMOTE EDIT'
+    contents = [path.read_bytes() for path in root.rglob('*') if path.is_file()]
+    assert b'LOCAL EDIT' in contents
+    assert b'UNIQUE REMOTE EDIT' in contents
+
+
+def test_continuously_changing_inventory_aborts_before_mutations(tmp_path):
+    root, drive, folder, pair, db = environment(tmp_path)
+    engine = TwoWaySyncEngine(drive, db, pair)
+    assert engine.run().downloaded == 1
+    fid = drive.find_file('a', folder)
+    (root / 'a').write_bytes(b'LOCAL EDIT')
+    drive.add_file('force-inventory', b'unrelated', folder)
+    listing = drive.list_folder
+    scans = []
+
+    def concurrent_edit(parent, page=None):
+        result = listing(parent, page)
+        scans.append(parent)
+        drive.modify_file(fid, b'UNIQUE REMOTE EDIT', modified='2099-01-01T00:00:00Z')
+        return result
+
+    drive.list_folder = concurrent_edit
+    report = engine.run()
+    assert report.failed > 0 and report.blocked_before_transfers
+    assert report.uploaded == report.downloaded == report.trashed_remote == 0
+    assert (root / 'a').read_bytes() == b'LOCAL EDIT'
+    assert drive.nodes[fid]['content'] == b'UNIQUE REMOTE EDIT'
+    assert 1 <= len(scans) <= 3

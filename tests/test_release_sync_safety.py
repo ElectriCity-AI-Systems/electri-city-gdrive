@@ -470,3 +470,45 @@ def test_upload_only_checks_cancellation_at_media_progress(tmp_path):
     with pytest.raises(RuntimeError, match='[Cc]ancel'):
         UploadOnlySyncEngine(drive_client=fake, database=db, cancel_event=event).sync_up(root, 'Backup')
     assert completed == []
+
+
+@pytest.mark.parametrize('replace_root', [False, True])
+def test_explicit_local_relationship_reset_does_not_reuse_deletion_history(tmp_path, replace_root):
+    root, fake, db, pair = setup_pair(tmp_path)
+    (root / 'a').write_bytes(b'keep remote')
+    old_engine = TwoWaySyncEngine(fake, db, pair)
+    assert old_engine.run().uploaded == 1
+    if replace_root:
+        root.rename(tmp_path / 'old-root')
+        root.mkdir()
+    else:
+        (root / 'a').unlink()
+    db.set_meta(old_engine._binding_key, '')
+    engine = TwoWaySyncEngine(fake, db, pair)
+    report = engine.run()
+    assert report.trashed_remote == 0
+    assert report.downloaded == 1
+    assert (root / 'a').read_bytes() == b'keep remote'
+    assert engine.pair_id != old_engine.pair_id
+    # The new generation must persist across ordinary restarts.
+    restarted = TwoWaySyncEngine(fake, db, pair)
+    assert restarted.run().failed == 0
+    assert restarted.pair_id == engine.pair_id
+
+
+def test_legacy_generationless_binding_starts_non_destructive_baseline(tmp_path):
+    import json
+    root, fake, db, pair = setup_pair(tmp_path)
+    (root / 'a').write_bytes(b'keep remote')
+    engine = TwoWaySyncEngine(fake, db, pair)
+    assert engine.run().uploaded == 1
+    binding = json.loads(db.get_meta(engine._binding_key))
+    binding.pop('generation', None)
+    db.set_meta(engine._binding_key, json.dumps(binding))
+    (root / 'a').unlink()
+    restarted = TwoWaySyncEngine(fake, db, pair)
+    report = restarted.run()
+    assert report.trashed_remote == 0
+    assert report.downloaded == 1
+    assert (root / 'a').read_bytes() == b'keep remote'
+    assert restarted.pair_id != engine.pair_id

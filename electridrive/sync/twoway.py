@@ -750,10 +750,17 @@ class TwoWaySyncEngine:
                     root_id = found
             else:
                 root_id = self.client.ensure_folder_path(self.pair.remote_folder)
-            self.db.set_meta(self._binding_key, json.dumps({'local_identity': identity, 'remote_id': root_id}))
+            binding = {'local_identity': identity, 'remote_id': root_id}
+        # A new relationship never inherits deletion authority, even if its
+        # paths/remote ID are unchanged or the filesystem reuses an inode.
+        # Fieldless legacy bindings are verified above, then baseline afresh.
+        if not isinstance(binding.get('generation'), str) or not binding['generation']:
+            binding['generation'] = uuid.uuid4().hex
+            self.db.set_meta(self._binding_key, json.dumps(binding))
         self._root_identity = identity
         self._bound_root_id = root_id
-        self.pair_id = 'v2:' + hashlib.sha256((self._scope + '|' + root_id).encode()).hexdigest()
+        relationship = json.dumps([self._scope, identity, root_id, binding['generation']])
+        self.pair_id = 'v3:' + hashlib.sha256(relationship.encode()).hexdigest()
         return root_id
 
     # ---------------------------------------------------------- Changes API
@@ -781,7 +788,7 @@ class TwoWaySyncEngine:
         if qa.current_policy():
             # QA capability boundaries forbid account-global Changes requests.
             return self.scan_remote()
-        fingerprint = json.dumps([self._scope, root_id, asdict(self.rules), sorted(self._local_exclusions), self.pair.canonical_remote_ids], sort_keys=True, default=lambda value: sorted(value))
+        fingerprint = json.dumps([self.pair_id, root_id, asdict(self.rules), sorted(self._local_exclusions), self.pair.canonical_remote_ids], sort_keys=True, default=lambda value: sorted(value))
         self._snapshot_key = 'remote-snapshot-v2:' + hashlib.sha256(fingerprint.encode()).hexdigest()
         cached = self._read_remote_snapshot(root_id)
         token = self.db.get_change_token(self.change_token_key)
@@ -802,25 +809,42 @@ class TwoWaySyncEngine:
             except Exception:
                 pass
         self._invalidate_remote_snapshot()
-        baseline = None
-        try:
-            starter = getattr(self.client, 'get_start_page_token', None)
-            baseline = starter() if callable(starter) else None
-        except Exception:
-            pass
-        entries = self.scan_remote()
-        if baseline and not self._remote_scan_errors and not self._path_conflict_candidates:
+        observed_change = False
+        for _attempt in range(3):
+            self._check_cancel()
+            baseline = None
             try:
-                # Verify feed access, but keep the pre-scan cursor. Changes that
-                # land during this scan must force another inventory next cycle.
-                self._consume_changes(baseline)
-                self.db.set_change_token(self.change_token_key, baseline)
-                self._write_remote_snapshot(entries, baseline)
+                starter = getattr(self.client, 'get_start_page_token', None)
+                baseline = starter() if callable(starter) else None
             except SyncCancelled:
                 raise
             except Exception:
                 pass
-        return entries
+            if observed_change and not baseline:
+                raise RuntimeError("Remote inventory changed; cannot verify a stable rescan")
+            entries = self.scan_remote()
+            if not baseline or self._remote_scan_errors:
+                return entries
+            try:
+                changed_during_scan, _resume = self._consume_changes(baseline)
+            except SyncCancelled:
+                raise
+            except Exception as exc:
+                if observed_change:
+                    raise RuntimeError("Remote inventory changed; cannot verify a stable rescan") from exc
+                # No observed concurrent mutation: preserve the full-inventory
+                # fallback for unavailable Changes endpoints, without caching.
+                return entries
+            if changed_during_scan:
+                # A known stale inventory must never reach reconciliation. A
+                # fresh pre-scan cursor bounds every retry; continued activity
+                # aborts before actions rather than exhausting unbounded scans.
+                observed_change = True
+                continue
+            self.db.set_change_token(self.change_token_key, baseline)
+            self._write_remote_snapshot(entries, baseline)
+            return entries
+        raise RuntimeError("Remote inventory kept changing during scan; retry synchronization")
 
     def _read_remote_snapshot(self, root_id: str) -> dict | None:
         raw = self.db.get_meta(self._snapshot_key)
