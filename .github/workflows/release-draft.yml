@@ -1,0 +1,59 @@
+name: Prepare verified release draft
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run:
+        description: Successful CI run ID for this exact main commit
+        required: true
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: electridrive-release-draft
+  cancel-in-progress: false
+jobs:
+  draft:
+    if: github.repository == 'ElectriCity-AI-Systems/electri-city-gdrive' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up verification Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install artifact inspection tools
+        run: sudo apt-get update && sudo apt-get install -y binutils libfuse2t64 fuse3
+      - name: Recover unchanged approved public Desktop client
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          seed="$RUNNER_TEMP/electridrive-public-client"
+          mkdir -p "$seed"
+          gh release download v2.1.3 --repo ElectriCity-AI-Systems/electri-city-gdrive --pattern electridrive_2.1.3_amd64.deb --dir "$seed"
+          printf '%s  %s\n' '35206f345e1fd1f50e29e6991afaed6eba402e82a7030642371f62ec82d98f35' "$seed/electridrive_2.1.3_amd64.deb" | sha256sum -c -
+          dpkg-deb -x "$seed/electridrive_2.1.3_amd64.deb" "$seed/extracted"
+          client="$seed/extracted/opt/electridrive/_internal/electridrive/google_api/client_baked.json"
+          printf '%s  %s\n' '180f96b5506b90aee5ca4fc8d852d394248f2a325b0a4e18e923d590942ea283' "$client" | sha256sum -c -
+          chmod 600 "$client"
+          echo "ELECTRIDRIVE_APP_CLIENT_FILE=$client" >> "$GITHUB_ENV"
+      - name: Build and verify both formats on GLIBC 2.35
+        run: bash scripts/build_candidate_in_container.sh
+      - name: Create CI-gated draft only
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN: ${{ inputs.ci_run }}
+        run: python3 scripts/prepare_release_draft.py --ci-run "$CI_RUN"
+      - name: Retain exact candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: electridrive-2.2.0-candidate-${{ github.sha }}
+          path: |
+            dist/electridrive_2.2.0_amd64.deb
+            dist/ElectriDrive-x86_64.AppImage
+            dist/SHA256SUMS.txt
+            dist/candidate-manifest.json
+          if-no-files-found: ignore

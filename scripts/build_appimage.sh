@@ -71,6 +71,6 @@ bash scripts/get_pinned_appimagetool.sh
 
 APPIMAGE=dist/ElectriDrive-x86_64.AppImage
 [ "$BUILD_CHANNEL" = "CI-QA" ] && APPIMAGE=dist/ElectriDrive-CI-QA-x86_64.AppImage
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" "$APPDIR" "$APPIMAGE"
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" --mksquashfs-opt=-processors --mksquashfs-opt=2 "$APPDIR" "$APPIMAGE"
 "$PY" scripts/verify_customer_artifact.py "$APPIMAGE" --expected-channel "$BUILD_CHANNEL"
 echo "Built: $APPIMAGE"
