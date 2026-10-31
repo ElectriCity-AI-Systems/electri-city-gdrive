@@ -22,10 +22,15 @@ def _try_keyring_get() -> str | None:
         return None
     try:
         import keyring
-        return keyring.get_password(SERVICE_NAME, TOKEN_KEY)
-    except Exception as exc:  # pragma: no cover - depends on desktop env
-        LOGGER.debug("keyring get unavailable: %s", exc)
+        from keyring.errors import NoKeyringError
+    except ImportError:
         return None
+    try:
+        return keyring.get_password(SERVICE_NAME, TOKEN_KEY)
+    except NoKeyringError:
+        return None
+    except Exception as exc:  # pragma: no cover - depends on desktop env
+        raise OAuthError("Could not access the credential keyring; unlock it and retry.") from exc
 
 
 def _try_keyring_set(token_json: str) -> bool:
@@ -53,8 +58,7 @@ def _load_token_from_file(path: Path) -> dict[str, Any] | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        LOGGER.warning("Could not read token fallback file: %s", exc)
-        return None
+        raise OAuthError("Could not read saved token file.") from exc
 
 
 def _save_token_to_file(path: Path, token_json: str) -> None:
@@ -81,23 +85,64 @@ def load_credentials():
     paths = get_paths()
     scopes = selected_scopes()
 
-    token_json = _try_keyring_get()
-    token_data = json.loads(token_json) if token_json else _load_token_from_file(paths.token_fallback_file)
-    if not token_data:
+    # The latest fallback remains authoritative until keyring rotation succeeds.
+    token_data = _load_token_from_file(paths.token_fallback_file)
+    if token_data is None:
+        token_json = _try_keyring_get()
+        try:
+            token_data = json.loads(token_json) if token_json else None
+        except (ValueError, TypeError) as exc:
+            raise OAuthError("Could not read saved keyring token.") from exc
+    if token_data is None:
         return None
-    if current_policy():
-        stored_scopes = token_data.get("scopes", [])
-        if isinstance(stored_scopes, str):
-            stored_scopes = stored_scopes.split()
-        if not stored_scopes or set(stored_scopes) - set(scopes):
+    if not isinstance(token_data, dict):
+        raise OAuthError("Invalid saved token metadata.")
+    if _scope_set(token_data.get("scopes")) != set(scopes):
+        if current_policy():
             raise OAuthError("QA requires a separately authorized drive.file token")
-    return Credentials.from_authorized_user_info(token_data, scopes)
+        clear_credentials()
+        return None
+    try:
+        return Credentials.from_authorized_user_info(token_data)
+    except (ValueError, TypeError) as exc:
+        raise OAuthError("Invalid saved token metadata.") from exc
+
+
+def _scope_set(scopes) -> set[str]:
+    if isinstance(scopes, str):
+        scopes = scopes.split()
+    return set(scopes or [])
+
+
+def validate_scopes(creds, scopes: list[str]) -> None:
+    """Require actual grants to match; requested labels cannot narrow a token."""
+    granted = getattr(creds, "granted_scopes", None)
+    actual = granted if granted is not None else getattr(creds, "scopes", None)
+    if not actual or _scope_set(actual) != set(scopes):
+        raise OAuthError(
+            "Google granted different scopes than requested. Revoke this app's existing "
+            "access in your Google account and reconnect with the selected scope."
+        )
+
+
+def has_saved_token() -> bool:
+    """Check checked profile storage in QA; fallback or keyring in normal mode."""
+    data = _load_token_from_file(get_paths().token_fallback_file)
+    if data is not None:
+        return True
+    return False if current_policy() else bool(_try_keyring_get())
 
 
 def save_credentials(creds) -> None:
     paths = get_paths()
-    token_json = creds.to_json()
-    if not _try_keyring_set(token_json):
+    token_data = json.loads(creds.to_json())
+    granted = getattr(creds, "granted_scopes", None)
+    if granted is not None:
+        token_data["scopes"] = sorted(_scope_set(granted))
+    token_json = json.dumps(token_data)
+    if _try_keyring_set(token_json):
+        paths.token_fallback_file.unlink(missing_ok=True)
+    else:
         _save_token_to_file(paths.token_fallback_file, token_json)
 
 
@@ -132,32 +177,33 @@ def authenticate_interactive():
     creds = load_credentials()
 
     if creds and creds.valid:
+        validate_scopes(creds, scopes)
         return creds
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        save_credentials(creds)
-        return creds
+        from google.auth.exceptions import RefreshError
+        try:
+            creds.refresh(Request())
+        except RefreshError as exc:
+            details = next((arg for arg in exc.args if isinstance(arg, dict)), {})
+            if details.get("error") != "invalid_grant" and not str(exc).startswith("invalid_grant:"):
+                raise
+            clear_credentials()
+        else:
+            validate_scopes(creds, scopes)
+            save_credentials(creds)
+            return creds
 
     from electridrive.google_api import app_client
 
-    if paths.credentials_file.exists() or paths.credentials_file.is_symlink():
-        # Power-user / self-host: a user-supplied Desktop OAuth client takes precedence.
-        if current_policy():
-            flow = InstalledAppFlow.from_client_config(json.loads(_read(paths.credentials_file)), scopes)
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(str(paths.credentials_file), scopes)
-    elif app_client.is_configured():
-        # Global distribution: the built-in app client — no per-user credentials.json.
-        flow = InstalledAppFlow.from_client_config(app_client.client_config(), scopes)
-    else:
+    if not app_client.is_configured():
         raise OAuthError(
-            "No OAuth client configured. Set the built-in app client via "
-            "ELECTRIDRIVE_CLIENT_ID (and ELECTRIDRIVE_CLIENT_SECRET) or "
-            f"{paths.config_dir / 'app_client.json'}, or drop your own Desktop OAuth "
-            f"client at {paths.credentials_file}."
+            "No OAuth client configured. Set ELECTRIDRIVE_CLIENT_ID or provide "
+            f"a Desktop OAuth client at {paths.credentials_file}."
         )
+    flow = InstalledAppFlow.from_client_config(app_client.client_config(), scopes)
     # run_local_server uses a loopback redirect with PKCE (S256).
     creds = flow.run_local_server(port=0)
+    validate_scopes(creds, scopes)
     save_credentials(creds)
     return creds

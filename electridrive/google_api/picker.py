@@ -11,21 +11,18 @@ browser and needs a configured app client + the Picker API enabled.
 from __future__ import annotations
 
 import logging
-import os
 import hmac
+import socket
+from threading import Timer
 import time
 import webbrowser
 
-# Google may return a broader scope than requested if the user already granted one to
-# this client (e.g. full drive). Relax oauthlib's strict scope-equality check so the
-# token exchange doesn't raise; onepick still requests only drive.file.
-os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from electridrive.config import DEFAULT_SCOPE
-from electridrive.google_api.oauth import save_credentials
+from electridrive.google_api.oauth import save_credentials, validate_scopes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -85,7 +82,35 @@ _SUCCESS_HTML = (
 
 
 class _Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        deadline = getattr(self.server, "deadline", time.monotonic() + 1.0)
+        remaining = max(0.001, deadline - time.monotonic())
+        self.request.settimeout(min(1.0, remaining))
+        super().setup()
+        # Socket timeouts alone reset with each byte. Bound even a dripping
+        # request to the flow's absolute deadline without leaving a worker alive.
+        def expire():
+            try:
+                self.request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        self._deadline_timer = Timer(remaining, expire)
+        self._deadline_timer.daemon = True
+        self._deadline_timer.start()
+
+    def handle(self):
+        try:
+            super().handle()
+        except (TimeoutError, ConnectionError):
+            pass
+
+    def finish(self):
+        self._deadline_timer.cancel()
+        super().finish()
+
     def do_GET(self):  # noqa: N802
+        if time.monotonic() >= getattr(self.server, "deadline", float("inf")):
+            return
         # An unrelated browser request, duplicate parameter or forged callback
         # must never be accepted as the OAuth response.
         parsed = urlparse(self.path)
@@ -113,7 +138,8 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
-def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickResult:
+def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0,
+                    persist: bool = True) -> PickResult:
     """Run the desktop Picker and return granted credentials + picked file ids."""
     try:
         from google_auth_oauthlib.flow import Flow
@@ -127,31 +153,29 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
     if not app_client.is_picker_configured():
         raise PickerError("No Google Picker API key configured for this build.")
 
-    httpd = HTTPServer(("127.0.0.1", 0), _Handler)
-    httpd.captured = None
-    httpd.timeout = 1.0
-    port = httpd.server_address[1]
+    with HTTPServer(("127.0.0.1", 0), _Handler) as httpd:
+        httpd.captured = None
+        httpd.deadline = time.monotonic() + timeout
+        port = httpd.server_address[1]
 
-    flow = Flow.from_client_config(
-        app_client.client_config(), scopes=[DEFAULT_SCOPE], autogenerate_code_verifier=True
-    )
-    # Match the actual IPv4-only listener: localhost may resolve to ::1 first.
-    flow.redirect_uri = f"http://127.0.0.1:{port}/"
-    auth_url, state = flow.authorization_url(**picker_auth_params(allow_folders))
-    if not isinstance(state, str) or not state:
-        httpd.server_close()
-        raise PickerError("OAuth flow did not provide a valid callback state")
-    httpd.expected_state = state
+        flow = Flow.from_client_config(
+            app_client.client_config(), scopes=[DEFAULT_SCOPE], autogenerate_code_verifier=True
+        )
+        # Match the actual IPv4-only listener: localhost may resolve to ::1 first.
+        flow.redirect_uri = f"http://127.0.0.1:{port}/"
+        auth_url, state = flow.authorization_url(**picker_auth_params(allow_folders))
+        if not isinstance(state, str) or not state:
+            raise PickerError("OAuth flow did not provide a valid callback state")
+        httpd.expected_state = state
 
-    LOGGER.info("Opening Drive Picker in browser")
-    webbrowser.open(auth_url)
-
-    deadline = time.time() + timeout
-    try:
-        while httpd.captured is None and time.time() < deadline:
+        LOGGER.info("Opening Drive Picker in browser")
+        webbrowser.open(auth_url)
+        while httpd.captured is None:
+            remaining = httpd.deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            httpd.timeout = min(1.0, remaining)
             httpd.handle_request()
-    finally:
-        httpd.server_close()
 
     if httpd.captured is None:
         raise PickerError("Timed out waiting for Drive Picker selection")
@@ -160,6 +184,8 @@ def pick_from_drive(allow_folders: bool = True, timeout: float = 300.0) -> PickR
 
     code, file_ids = extract_pick_result(httpd.captured)
     flow.fetch_token(code=code)
-    save_credentials(flow.credentials)
+    validate_scopes(flow.credentials, [DEFAULT_SCOPE])
+    if persist:
+        save_credentials(flow.credentials)
     LOGGER.info("Picker granted %d item(s)", len(file_ids))
     return PickResult(flow.credentials, file_ids)

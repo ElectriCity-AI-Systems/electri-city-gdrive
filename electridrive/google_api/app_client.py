@@ -5,12 +5,13 @@ confidential and ship inside the app. End users just sign in — no per-user
 ``credentials.json``. Authorization uses PKCE + a loopback redirect.
 
 Resolution order (first match wins):
-1. ``$ELECTRIDRIVE_CLIENT_ID`` / ``$ELECTRIDRIVE_CLIENT_SECRET`` env vars
-2. ``<config_dir>/app_client.json`` (an installed-app client JSON)
-3. the bundled :data:`BUNDLED_CLIENT` below
+1. user-provided ``<config_dir>/credentials.json``
+2. ``$ELECTRIDRIVE_CLIENT_ID`` / ``$ELECTRIDRIVE_CLIENT_SECRET`` env vars
+3. ``<config_dir>/app_client.json`` (an installed-app client JSON)
+4. the bundled :data:`BUNDLED_CLIENT` below
 
-A user-provided ``<config_dir>/credentials.json`` (handled in ``oauth.py``) still
-takes precedence over all of these for power users / self-hosting.
+The same resolver is used by desktop login and Picker. QA mode permits only
+checked profile client files and the unconfigured placeholder.
 """
 from __future__ import annotations
 
@@ -93,7 +94,15 @@ def _config_from(data: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def client_config() -> dict[str, Any]:
-    """OAuth client config. Precedence: env > user file > baked package > placeholder."""
+    """Use one selected Desktop client for both login and Picker."""
+    path = get_paths().credentials_file
+    if path.exists() or path.is_symlink():
+        # _read preserves QA profile confinement, including dangling symlinks.
+        data = json.loads(_read(path)) if current_policy() else json.loads(path.read_text(encoding="utf-8"))
+        config = _config_from(data)
+        if not config:
+            raise ValueError("Invalid Desktop OAuth client configuration")
+        return config
     if current_policy():
         return _config_from(_user_file_data()) or BUNDLED_CLIENT
     return (_from_env() or _config_from(_user_file_data())
