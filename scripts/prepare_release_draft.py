@@ -8,6 +8,9 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import os
+import stat
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'ElectriCity-AI-Systems/electri-city-gdrive'
@@ -29,11 +32,63 @@ def digest(path):
 def source_snapshot():
     if command('git', 'status', '--porcelain', '--untracked-files=normal'):
         raise ValueError('Candidate source must be committed and clean')
+    fingerprints = {}
+    object_format = command('git','rev-parse','--show-object-format')
+    for entry in command('git','ls-tree','-rz','--full-tree','HEAD').split('\0'):
+        if not entry: continue
+        metadata,name = entry.split('\t',1)
+        mode,kind,expected = metadata.split()
+        path = ROOT/name
+        if kind != 'blob' or path.is_symlink() or not path.is_file():
+            raise ValueError(f'Working source is not a regular HEAD file: {name}')
+        payload = path.read_bytes()
+        actual = hashlib.new(object_format,b'blob '+str(len(payload)).encode()+b'\0'+payload).hexdigest()
+        executable = bool(path.stat().st_mode & 0o111)
+        if actual != expected or executable != (mode == '100755'):
+            raise ValueError(f'Working source differs from HEAD: {name}')
+        fingerprints[name] = hashlib.sha256(payload).hexdigest()
     version = re.search(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
                         (ROOT/'pyproject.toml').read_text(), re.M).group(1)
-    files = command('git', 'ls-files', '-z').split('\0')
     return {'version':version, 'commit':command('git','rev-parse','HEAD'),
-            'source_sha256':{name:digest(ROOT/name) for name in files if name}}
+            'source_sha256':fingerprints}
+
+
+def validate_tag_lines(output, tag, commit):
+    refs = dict(line.split(None,1)[::-1] for line in output.splitlines() if line.strip())
+    ref = 'refs/tags/'+tag
+    actual = refs.get(ref+'^{}',refs.get(ref))
+    if actual is not None and actual != commit:
+        raise ValueError('Existing remote tag does not resolve to the candidate commit')
+    return actual
+
+
+def validate_remote_tag(tag, commit):
+    output = command('git','ls-remote','--tags',f'https://github.com/{REPOSITORY}.git',
+                     'refs/tags/'+tag,'refs/tags/'+tag+'^{}')
+    return validate_tag_lines(output,tag,commit)
+
+
+def stage_uploads(directory, manifest, manifest_bytes, destination):
+    files,expected = [],{}
+    for entry in manifest['assets']:
+        name=entry['name']
+        if name != Path(name).name:
+            raise ValueError('Unsafe upload name')
+        target=destination/name
+        fd=os.open(Path(directory)/name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        h=hashlib.sha256();size=0
+        with os.fdopen(fd,'rb') as source, target.open('xb') as out:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ValueError('Upload source is not a regular file')
+            for block in iter(lambda:source.read(1024*1024),b''):
+                h.update(block);size+=len(block);out.write(block)
+        if size!=entry['size'] or h.hexdigest()!=entry['sha256']:
+            raise ValueError('Asset changed while preparing immutable upload snapshot')
+        files.append(target);expected[name]=entry['sha256']
+    target=destination/'candidate-manifest.json'
+    target.write_bytes(manifest_bytes)
+    files.append(target);expected[target.name]=hashlib.sha256(manifest_bytes).hexdigest()
+    return files,expected
 
 
 def validate_ci(run, jobs, commit):
@@ -110,7 +165,8 @@ def main(argv=None):
         if not args.source_record: parser.error('--record requires --source-record')
         record_candidate(args.record,json.loads(args.source_record.read_text()));return
     if not args.ci_run: parser.error('--ci-run is required to create a draft')
-    manifest=json.loads(args.manifest.read_text());current=source_snapshot()
+    manifest_bytes=args.manifest.read_bytes()
+    manifest=json.loads(manifest_bytes);current=source_snapshot()
     if any(manifest.get(key)!=value for key,value in current.items()):
         raise ValueError('Manifest does not match current committed source')
     if manifest.get('channel')!='CUSTOMER-CANDIDATE' or manifest.get('max_glibc')!='2.35':
@@ -121,18 +177,22 @@ def main(argv=None):
     latest=api('releases/latest')['tag_name'].removeprefix('v')
     if tuple(map(int,current['version'].split('.'))) <= tuple(map(int,latest.split('.'))):
         raise ValueError('New candidate version must be newer than Latest')
-    assets=[directory/item['name'] for item in manifest['assets']]+[args.manifest]
-    if any(item['tag_name']=='v'+current['version'] for item in api('releases?per_page=100')):
+    tag='v'+current['version']
+    validate_remote_tag(tag,current['commit'])
+    if any(item['tag_name']==tag for item in api('releases?per_page=100')):
         raise ValueError('Release already exists; inspect the existing draft instead of overwriting it')
-    result=command(*release_command(current['version'],current['commit'],assets,args.notes))
-    release=next(item for item in api('releases?per_page=100') if item['tag_name']=='v'+current['version'])
+    with tempfile.TemporaryDirectory(prefix='electridrive-verified-upload-') as temporary:
+        assets,expected=stage_uploads(directory,manifest,manifest_bytes,Path(temporary))
+        result=command(*release_command(current['version'],current['commit'],assets,args.notes))
+    release=next(item for item in api('releases?per_page=100') if item['tag_name']==tag)
     if not release['draft'] or release['target_commitish']!=current['commit']:
         raise ValueError('Draft target verification failed')
-    expected={p.name:digest(p) for p in assets}
+    validate_remote_tag(tag,current['commit'])
     uploaded={item['name']:item.get('digest') for item in release['assets']}
     if uploaded!={name:'sha256:'+sha for name,sha in expected.items()}:
-        raise ValueError('Uploaded draft assets do not match verified local bytes')
+        raise ValueError('Uploaded draft assets do not match verified manifest bytes')
     print(result)
+
 
 
 if __name__=='__main__': main()

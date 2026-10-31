@@ -82,6 +82,8 @@ jobs:
           set -e
           test "$status" -eq 124
 
+          # Child bash intentionally expands its own status.
+          # shellcheck disable=SC2016
           QT_QPA_PLATFORM=xcb XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" XDG_CACHE_HOME="$profile/cache" \
           XDG_RUNTIME_DIR="$profile/runtime" \
@@ -92,6 +94,8 @@ jobs:
               test "$status" -eq 124
             '
 
+          # Child bash intentionally expands its own status.
+          # shellcheck disable=SC2016
           QT_QPA_PLATFORM=xcb XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" XDG_CACHE_HOME="$profile/cache" \
           XDG_RUNTIME_DIR="$profile/runtime" \

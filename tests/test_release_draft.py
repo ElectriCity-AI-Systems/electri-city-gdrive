@@ -52,3 +52,39 @@ def test_record_refuses_source_drift(monkeypatch, tmp_path):
     monkeypatch.setattr(module,'source_snapshot',lambda:{'commit':'new','version':'2.2.0'})
     with pytest.raises(ValueError,match='Source changed'):
         module.record_candidate(tmp_path/'manifest.json',{'commit':'old','version':'2.2.0'})
+
+
+def test_existing_tag_must_resolve_to_candidate_commit():
+    tag='v2.2.0';ref='refs/tags/'+tag
+    with pytest.raises(ValueError):module.validate_tag_lines('b'*40+'\t'+ref+'\n',tag,'a'*40)
+    assert module.validate_tag_lines('',tag,'a'*40) is None
+    assert module.validate_tag_lines('b'*40+'\t'+ref+'\n'+'a'*40+'\t'+ref+'^{}\n',tag,'a'*40)=='a'*40
+
+
+@pytest.mark.parametrize('hidden_flag',['--assume-unchanged','--skip-worktree'])
+def test_source_rejects_hidden_tracked_modification(tmp_path,monkeypatch,hidden_flag):
+    import subprocess
+    def git(*args):
+        return subprocess.check_output(['git',*args],cwd=tmp_path,text=True)
+    git('init','-q');git('config','user.email','test@example.invalid');git('config','user.name','Test')
+    path=tmp_path/'pyproject.toml';path.write_text('version = "2.2.0"\n')
+    git('add','.');git('commit','-qm','baseline')
+    git('update-index',hidden_flag,'pyproject.toml')
+    path.write_text('version = "9.9.9"\n')
+    assert not git('status','--porcelain').strip()
+    monkeypatch.setattr(module,'ROOT',tmp_path)
+    with pytest.raises(ValueError,match='HEAD'):
+        module.source_snapshot()
+
+
+def test_upload_snapshot_uses_verified_manifest_hashes(tmp_path):
+    import json,hashlib
+    directory=tmp_path/'source';directory.mkdir();stage=tmp_path/'upload';stage.mkdir()
+    path=directory/'electridrive_2.2.0_amd64.deb';path.write_bytes(b'verified')
+    manifest={'assets':[{'name':path.name,'size':8,'sha256':module.digest(path)}]}
+    raw=json.dumps(manifest).encode()
+    files,expected=module.stage_uploads(directory,manifest,raw,stage)
+    path.write_bytes(b'replaced after validation')
+    assert files[0].read_bytes()==b'verified'
+    assert expected[path.name]==hashlib.sha256(b'verified').hexdigest()
+    assert expected['candidate-manifest.json']==hashlib.sha256(raw).hexdigest()
