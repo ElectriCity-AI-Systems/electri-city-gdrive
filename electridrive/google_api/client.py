@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import mimetypes
 import os
 import stat
 import tempfile
@@ -154,6 +156,8 @@ class FileListing:
 
 
 class DriveClientProtocol(Protocol):
+    @property
+    def account_key(self) -> str: ...
     def find_folder(self, name: str, parent_id: str | None = ...) -> str | None: ...
     def find_file(self, name: str, parent_id: str) -> str | None: ...
     def create_folder(self, name: str, parent_id: str | None = ...) -> str: ...
@@ -202,6 +206,8 @@ class GoogleDriveClient:
         return object.__new__(cls)
 
     def __init__(self, service=None, credentials=None):
+        self._account_key = None
+        self._account_lock = threading.Lock()
         from electridrive.qa_policy import current_policy
         policy = current_policy()
         self._qa_profile = str(policy.profile) if policy else None
@@ -233,6 +239,22 @@ class GoogleDriveClient:
                         cache_discovery=False, static_discovery=True)
             self._local.service = svc
         return svc
+
+    @property
+    def account_key(self) -> str:
+        with self._account_lock:
+            if self._account_key is None:
+                about = self.service.about().get(
+                    fields="user(permissionId,emailAddress)"
+                ).execute(num_retries=3)
+                user = about.get("user", {})
+                if user.get("permissionId"):
+                    self._account_key = "permission:" + user["permissionId"]
+                elif user.get("emailAddress"):
+                    self._account_key = "email:" + user["emailAddress"].casefold()
+                else:
+                    raise ValueError("Drive did not provide a stable account identity")
+            return self._account_key
 
     @staticmethod
     def _escape_query_text(value: str) -> str:
@@ -419,7 +441,8 @@ class GoogleDriveClient:
 
         metadata = {"name": remote_name, "parents": [parent_id] if parent_id != "root" else []}
         total = local_file.stat().st_size
-        media = MediaFileUpload(str(local_file), resumable=True)
+        mime_type = mimetypes.guess_type(remote_name)[0] or "application/octet-stream"
+        media = MediaFileUpload(str(local_file), mimetype=mime_type, resumable=True)
         request = self.service.files().create(body=metadata, media_body=media, fields="id")
         response = None
         while response is None:
@@ -468,7 +491,11 @@ class GoogleDriveClient:
         local_file = Path(local_file)
         metadata = {"name": remote_name} if remote_name is not None else {}
         total = local_file.stat().st_size
-        media = MediaFileUpload(str(local_file), resumable=True)
+        # Descriptor paths have no extension. Retain the existing object's MIME
+        # rather than accidentally converting images/docs to octet-stream.
+        mime_type = (self.get_metadata(file_id).mime_type if not local_file.suffix
+                     else mimetypes.guess_type(str(local_file))[0])
+        media = MediaFileUpload(str(local_file), mimetype=mime_type or "application/octet-stream", resumable=True)
         request = self.service.files().update(
             fileId=file_id,
             body=metadata,
@@ -498,14 +525,32 @@ class GoogleDriveClient:
         from electridrive.qa_policy import current_policy
         if not current_policy():
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-        request = self.service.files().get_media(fileId=file_id)
+        files = self.service.files()
+        metadata = self.get_metadata(file_id) if callable(getattr(files, "get", None)) else None
+        request = files.get_media(fileId=file_id)
         with _atomic_download_file(dest_path) as handle:
-            downloader = MediaIoBaseDownload(handle, request)
+            digest = hashlib.md5()
+            written = 0
+            class VerifiedWriter:
+                def write(self, data):
+                    nonlocal written
+                    count = handle.write(data)
+                    digest.update(data[:count])
+                    written += count
+                    return count
+                def __getattr__(self, name):
+                    return getattr(handle, name)
+            downloader = MediaIoBaseDownload(VerifiedWriter(), request)
             done = False
             while not done:
                 status, done = downloader.next_chunk()
                 if status and progress_cb:
                     progress_cb(int(status.resumable_progress), int(status.total_size or 0))
+            if metadata is not None and (
+                (metadata.size is not None and written != metadata.size)
+                or (metadata.md5_checksum and digest.hexdigest() != metadata.md5_checksum)
+            ):
+                raise ValueError("Downloaded content failed integrity check")
         return dest_path
 
     def export_file(

@@ -69,7 +69,7 @@ class TransferRecord:
 
 class SyncDatabase:
     _TABLES = ("files", "folder_map", "app_meta", "change_tokens", "sync_items",
-               "sync_folders", "remote_nodes", "transfers", "sqlite_sequence")
+               "scoped_files", "sync_folders", "remote_nodes", "transfers", "sqlite_sequence")
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -249,6 +249,12 @@ class SyncDatabase:
                     updated_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS scoped_files (
+                    scope TEXT NOT NULL, local_path TEXT NOT NULL, remote_id TEXT NOT NULL,
+                    remote_path TEXT NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL, status TEXT NOT NULL, updated_at REAL NOT NULL,
+                    PRIMARY KEY(scope, local_path)
+                );
                 CREATE TABLE IF NOT EXISTS folder_map (
                     local_rel_path TEXT PRIMARY KEY,
                     remote_path TEXT NOT NULL,
@@ -319,9 +325,29 @@ class SyncDatabase:
             self._commit()
 
     # --------------------------------------------------------------- files index
-    def get_file(self, local_path: str) -> FileRecord | None:
+    def get_meta(self, key: str) -> str | None:
         with self._access():
-            row = self._conn.execute("SELECT * FROM files WHERE local_path=?", (local_path,)).fetchone()
+            row = self._conn.execute("SELECT value FROM app_meta WHERE key=?", (key,)).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._access():
+            self._conn.execute(
+                "INSERT INTO app_meta(key, value, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, time()),
+            )
+            self._commit()
+
+    # --------------------------------------------------------------- files index
+    def get_file(self, local_path: str, scope: str = "") -> FileRecord | None:
+        with self._access():
+            if scope:
+                row = self._conn.execute("SELECT local_path, remote_id, remote_path, size, mtime_ns, "
+                                         "sha256, status, updated_at FROM scoped_files "
+                                         "WHERE scope=? AND local_path=?", (scope, local_path)).fetchone()
+            else:
+                row = self._conn.execute("SELECT * FROM files WHERE local_path=?", (local_path,)).fetchone()
         if row is None:
             return None
         return FileRecord(**dict(row))
@@ -336,7 +362,19 @@ class SyncDatabase:
         mtime_ns: int,
         sha256: str,
         status: str,
+        scope: str = "",
     ) -> None:
+        if scope:
+            with self._access():
+                self._conn.execute(
+                    "INSERT INTO scoped_files(scope, local_path, remote_id, remote_path, size, mtime_ns, sha256, status, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(scope, local_path) DO UPDATE SET "
+                    "remote_id=excluded.remote_id, remote_path=excluded.remote_path, size=excluded.size, "
+                    "mtime_ns=excluded.mtime_ns, sha256=excluded.sha256, status=excluded.status, updated_at=excluded.updated_at",
+                    (scope, local_path, remote_id, remote_path, size, mtime_ns, sha256, status, time()),
+                )
+                self._commit()
+            return
         with self._access():
             self._conn.execute(
                 """

@@ -3,6 +3,9 @@ from __future__ import annotations
 from electridrive import qa_policy as qa
 
 import logging
+import hashlib
+import inspect
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -12,6 +15,8 @@ from electridrive.storage.database import SyncDatabase
 from electridrive.sync.hasher import sha256_file
 from electridrive.sync.rules import SyncRules
 from electridrive.sync.tree import canonical_sync_root, safe_local_path, scan_local_tree
+
+from electridrive.sync.safety import (SyncCancelled, check_cancelled, pair_lock, account_key_for, opened_source)
 
 LOGGER = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, int, int], None]
@@ -40,12 +45,26 @@ class UploadOnlySyncEngine:
         rules: SyncRules | None = None,
         log_callback: LogCallback | None = None,
         progress_callback: ProgressCallback | None = None,
+        cancel_event=None,
     ):
+        self.cancel_event = cancel_event
+        self._file_scope = ""
         self.drive_client = drive_client
         self.database = database
         self.rules = rules if rules is not None else SyncRules.full_backup()
         self.log_callback = log_callback
         self.progress_callback = progress_callback
+
+    def _transfer(self, method, *args):
+        """Older small adapters may not expose chunk progress callbacks."""
+        parameters = inspect.signature(method).parameters.values()
+        progress = any(item.name == "progress_cb" or item.kind == inspect.Parameter.VAR_KEYWORD
+                       for item in parameters)
+        kwargs = {"progress_cb": lambda *_: check_cancelled(self.cancel_event)} if progress else {}
+        check_cancelled(self.cancel_event)
+        result = method(*args, **kwargs)
+        check_cancelled(self.cancel_event)
+        return result
 
     def _log(self, message: str) -> None:
         LOGGER.info(message)
@@ -64,12 +83,17 @@ class UploadOnlySyncEngine:
     def should_upload(self, file_path: Path, sha256: str) -> bool:
         qa.require_local(file_path)
         stat = file_path.stat()
-        record = self.database.get_file(str(file_path))
+        record = self.database.get_file(str(file_path), scope=self._file_scope)
         if record is None:
             return True
         return not (record.size == stat.st_size and record.mtime_ns == stat.st_mtime_ns and record.sha256 == sha256)
 
     def sync_up(self, local_root: Path, remote_folder: str) -> SyncResult:
+        check_cancelled(self.cancel_event)
+        with pair_lock(Path(local_root).expanduser().absolute()):
+            return self._sync_up_locked(local_root, remote_folder)
+
+    def _sync_up_locked(self, local_root: Path, remote_folder: str) -> SyncResult:
         qa.check_startup()
         from electridrive.config import SyncPair
         qa.validate_pair(SyncPair(str(local_root), remote_folder, direction="up_only", delete_policy="off"))
@@ -89,9 +113,14 @@ class UploadOnlySyncEngine:
             result.failed += 1
             result.errors.append(error)
             self._log(f"Local traversal failed: {error}")
-        if tree.errors and self.rules.fail_on_unsupported:
+        if tree.errors:
             return result
+        check_cancelled(self.cancel_event)
         root_remote_id = self.drive_client.ensure_folder_path(remote_folder)
+        identity = local_root.stat()
+        scope = json.dumps([account_key_for(self.drive_client), str(local_root),
+                            identity.st_dev, identity.st_ino, remote_folder, root_remote_id])
+        self._file_scope = hashlib.sha256(scope.encode()).hexdigest()
 
         synchronized_folders: set[str] = set()
         remote_directories: dict[str, str] = {"": root_remote_id}
@@ -99,6 +128,7 @@ class UploadOnlySyncEngine:
             tree.directories,
             key=lambda path: (len(path.relative_to(local_root).parts), path.as_posix()),
         ):
+            check_cancelled(self.cancel_event)
             relative = directory.relative_to(local_root).as_posix()
             folder_path = f"{remote_folder.rstrip('/')}/{relative}"
             try:
@@ -138,6 +168,7 @@ class UploadOnlySyncEngine:
         synchronized_files: set[str] = set()
 
         for index, file_path in enumerate(files, start=1):
+            check_cancelled(self.cancel_event)
             result.scanned += 1
             if self.progress_callback:
                 self.progress_callback(str(file_path), index, total)
@@ -161,7 +192,7 @@ class UploadOnlySyncEngine:
                     )
                     remote_path = f"{folder_path}/{relative.name}"
 
-                previous = self.database.get_file(str(file_path))
+                previous = self.database.get_file(str(file_path), scope=self._file_scope)
                 finder = getattr(self.drive_client, "find_file", None)
                 remote_id = finder(file_path.name, parent_id) if callable(finder) else None
 
@@ -178,18 +209,17 @@ class UploadOnlySyncEngine:
                 if remote_id is None and previous is not None and not callable(finder):
                     remote_id = previous.remote_id
 
-                if remote_id is None:
-                    remote_id = self.drive_client.upload_file(
-                        file_path, parent_id, file_path.name
-                    )
-                    operation = "Uploaded"
-                else:
-                    # The remote ID is the canonical identity. A changed local
-                    # file replaces its media instead of creating a same-named
-                    # Drive object, including after local state was lost.
-                    self.drive_client.update_file(remote_id, file_path)
-                    operation = "Updated"
-                stat = file_path.stat()
+                with opened_source(local_root, relative.as_posix()) as source:
+                    stat = source.stat()
+                    digest = sha256_file(source)
+                    check_cancelled(self.cancel_event)
+                    if remote_id is None:
+                        remote_id = self._transfer(self.drive_client.upload_file, source, parent_id, file_path.name)
+                        operation = "Uploaded"
+                    else:
+                        self._transfer(self.drive_client.update_file, remote_id, source)
+                        operation = "Updated"
+                    check_cancelled(self.cancel_event)
                 self.database.upsert_file(
                     local_path=str(file_path),
                     remote_id=remote_id,
@@ -198,10 +228,17 @@ class UploadOnlySyncEngine:
                     mtime_ns=stat.st_mtime_ns,
                     sha256=digest,
                     status="uploaded",
+                    scope=self._file_scope,
+                )
+                self.database.upsert_file(
+                    local_path=str(file_path), remote_id=remote_id, remote_path=remote_path,
+                    size=stat.st_size, mtime_ns=stat.st_mtime_ns, sha256=digest, status="uploaded",
                 )
                 result.uploaded += 1
                 synchronized_files.add(relative.as_posix())
                 self._log(f"{operation}: {relative}")
+            except SyncCancelled:
+                raise
             except Exception as exc:  # keep sync robust per file
                 result.failed += 1
                 error = f"Failed {file_path}: {exc}"

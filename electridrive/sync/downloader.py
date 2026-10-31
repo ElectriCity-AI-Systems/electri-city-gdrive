@@ -39,6 +39,16 @@ def _dest_for(remote: RemoteFile, dest_dir: Path) -> tuple[Path, bool, str | Non
     return dest_dir / safe, False, None
 
 
+def _available_file(path: Path, used: set[Path]) -> Path:
+    original = path
+    index = 1
+    while path.exists() or path.is_symlink() or path in used:
+        index += 1
+        path = original.with_name(f"{original.stem} ({index}){original.suffix}")
+    used.add(path)
+    return path
+
+
 def plan_download(client, remote: RemoteFile, dest_dir: Path) -> list[DownloadItem]:
     """Resolve a remote file/folder into a flat list of concrete download items.
 
@@ -60,6 +70,7 @@ def plan_download(client, remote: RemoteFile, dest_dir: Path) -> list[DownloadIt
     if not remote.is_folder:
         path, is_doc, export_mime = _dest_for(remote, dest_dir)
         _reject_symlink_path(dest_dir, path)
+        path = _available_file(path, set())
         items.append(
             DownloadItem(
                 file_id=remote.id,
@@ -123,6 +134,7 @@ def _walk_folder(
             else:
                 path, is_doc, export_mime = _dest_for(child, folder_dir)
                 _reject_symlink_path(folder_dir, path)
+                path = _available_file(path, {item.dest_path for item in items})
                 items.append(
                     DownloadItem(
                         file_id=child.id,

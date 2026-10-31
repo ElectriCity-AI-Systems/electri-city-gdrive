@@ -1053,10 +1053,10 @@ def test_failed_root_rescan_does_not_offer_old_duplicate_candidates(tmp_path):
     class UnavailableDrive(FakeDrive):
         unavailable = False
 
-        def ensure_folder_path(self, path):
+        def get_metadata(self, file_id):
             if self.unavailable:
                 raise RuntimeError("synthetic root unavailable")
-            return super().ensure_folder_path(path)
+            return super().get_metadata(file_id)
 
     root = tmp_path / "synthetic"
     root.mkdir()

@@ -19,9 +19,13 @@ from electridrive import qa_policy as qa
 
 import hashlib
 import logging
+import json
+import os
+import tempfile
+import uuid
 import shutil
 from collections import Counter
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace, asdict
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -31,6 +35,8 @@ from electridrive.sync.downloader import sanitize_name
 from electridrive.sync.hasher import md5_file
 from electridrive.sync.rules import SyncRules
 from electridrive.sync.tree import canonical_sync_root, safe_local_path, scan_local_tree
+
+from electridrive.sync.safety import (SyncCancelled, check_cancelled, account_key_for, pair_lock, opened_source, anchored_parent, checked_path, has_symlink, validate_component)
 
 LOGGER = logging.getLogger(__name__)
 LOCAL_TRASH = ".electridrive-trash"
@@ -150,6 +156,9 @@ def reconcile(
     actions: list[Action] = []
     for rel in sorted(set(local) | set(remote) | set(last)):
         L, R, S = local.get(rel), remote.get(rel), last.get(rel)
+
+        if S and R and S.remote_id and S.remote_id != R.file_id:
+            S = None
 
         # Native Workspace files are deliberately remote-authoritative exports.
         # Their exported bytes have no meaningful equality relationship with a
@@ -293,7 +302,7 @@ def _conflict_name(rel: str) -> str:
 
 class TwoWaySyncEngine:
     def __init__(self, client, db, pair, rules: SyncRules | None = None,
-                 log_cb=None):
+                 log_cb=None, cancel_event=None):
         qa.check_startup()
         qa.validate_pair(pair)
         self.client = qa.restrict_client(client)
@@ -321,9 +330,18 @@ class TwoWaySyncEngine:
             self.rules = full_rules
         else:
             self.rules = SyncRules()
+        self.cancel_event = cancel_event
+        self._root_identity = None
+        self._bound_root_id = None
+        self._snapshot_key = None
+        self._suppressed = set()
+        self._local_exclusions = set()
         self.log_cb = log_cb
         self.local_root = Path(pair.local_path).expanduser()
-        self.pair_id = pair_id_for(pair.local_path, pair.remote_folder)
+        self._account_key = account_key_for(self.client)
+        self._scope = json.dumps([self._account_key, str(self.local_root.absolute()), pair.remote_folder])
+        self._binding_key = 'sync-v2:' + hashlib.sha256(self._scope.encode()).hexdigest()
+        self.pair_id = 'v2:' + hashlib.sha256(self._scope.encode()).hexdigest()
         self.change_token_key = f"two-way:{self.pair_id}"
         self._dir_ids: dict[str, str] = {}
         self._canonical_ids: dict[str, str] = {}
@@ -360,16 +378,21 @@ class TwoWaySyncEngine:
         self._local_dirs = tree.relative_directories
         self._local_scan_errors = list(tree.errors)
         self._local_excluded = len(tree.excluded)
+        self._local_exclusions = set(tree.excluded)
         for path in tree.files:
             rel = path.relative_to(tree.root).as_posix()
             try:
+                self._check_cancel()
                 path = safe_local_path(tree.root, rel)
                 if not path.is_file():
                     raise OSError("selected entry is no longer a regular file")
-                st = path.stat()
-                out[rel] = LocalEntry(
-                    rel, st.st_mtime_ns, st.st_size, md5_file(path)
-                )
+                with opened_source(tree.root, rel) as source:
+                    st = source.stat()
+                    digest = md5_file(source)
+                    after = source.stat()
+                    if (st.st_size, st.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                        raise OSError("local file changed while scanning")
+                out[rel] = LocalEntry(rel, st.st_mtime_ns, st.st_size, digest)
             except OSError as exc:
                 self._local_scan_errors.append(
                     f"cannot read {rel}: {type(exc).__name__}"
@@ -390,20 +413,8 @@ class TwoWaySyncEngine:
         self._dir_candidates = {}
         self._duplicate_file_paths = set()
         self._remote_excluded = 0
-        if qa.current_policy():
-            root_id = self.client.ensure_folder_path(self.pair.remote_folder)
-        elif self.pair.direction == "down_only":
-            # Resolving a download source must be read-only. A typo, moved
-            # folder or revoked access is not authority to create cloud data.
-            root_id = "root"
-            parts = self.pair.remote_folder.replace("\\", "/").split("/")
-            for part in (part.strip() for part in parts if part.strip()):
-                found = self.client.find_folder(part, root_id)
-                if found is None:
-                    raise ValueError("Download source Drive folder is missing or inaccessible")
-                root_id = found
-        else:
-            root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+        self._suppressed = set(self._local_exclusions)
+        root_id = self._bound_root_id or self._bind_roots()
         self._dir_ids = {"": root_id}
         entries: dict[str, RemoteEntry] = {}
         self._walk_remote(root_id, "", entries, {root_id})
@@ -419,6 +430,7 @@ class TwoWaySyncEngine:
         page = None
         seen_pages: set[str] = set()
         while True:
+            self._check_cancel()
             listing = self.client.list_folder(folder_id, page)
             for f in listing.files:
                 name = sanitize_name(f.name)
@@ -429,6 +441,10 @@ class TwoWaySyncEngine:
                     if not name.lower().endswith(ext):
                         name = f"{name}{ext}"
                 rel = f"{prefix}{name}" if not prefix else f"{prefix}/{name}"
+                if self._excluded(rel):
+                    self._suppressed.add(rel)
+                    self._remote_excluded += 1
+                    continue
                 if f.is_folder:
                     if self.rules.is_excluded_relative(rel, is_file=False):
                         self._remote_excluded += 1
@@ -463,6 +479,7 @@ class TwoWaySyncEngine:
                 elif self.rules.is_excluded_relative(
                     rel, is_file=True, size=f.size
                 ) or is_shortcut:
+                    self._suppressed.add(rel)
                     self._remote_excluded += 1
                 elif f.is_google_doc:
                     fingerprint = f"workspace:{f.id}:{f.modified_time or ''}"
@@ -681,10 +698,63 @@ class TwoWaySyncEngine:
     def load_last(self) -> dict[str, LastEntry]:
         out: dict[str, LastEntry] = {}
         for it in self.db.list_sync_items(self.pair_id):
+            if self._excluded(it.local_rel) or self.rules.is_excluded_relative(it.local_rel, is_file=True, size=it.local_size):
+                continue
             out[it.local_rel] = LastEntry(
                 it.local_rel, it.sha256, it.remote_md5, it.remote_id
             )
         return out
+
+    def _check_cancel(self, *_args):
+        check_cancelled(self.cancel_event)
+
+    def _check_root(self):
+        requested = Path(self.pair.local_path).expanduser()
+        if requested.is_symlink() or any(parent.is_symlink() for parent in requested.parents):
+            raise ValueError("Sync root cannot be a symbolic link")
+        stat = requested.stat()
+        identity = [stat.st_dev, stat.st_ino]
+        if not requested.is_dir() or (self._root_identity is not None and identity != self._root_identity):
+            raise ValueError("Local sync root identity changed; explicit rebind required")
+        return identity
+
+    def _excluded(self, rel: str) -> bool:
+        return (any(rel == item or rel.startswith(item + '/') for item in self._suppressed | self._local_exclusions)
+                or self.rules.is_excluded_relative(rel, is_file=True)
+                or has_symlink(self.local_root, self.local_root / rel))
+
+    def _bind_roots(self) -> str:
+        self._check_cancel()
+        identity = self._check_root()
+        saved = self.db.get_meta(self._binding_key)
+        if saved:
+            binding = json.loads(saved)
+            if binding['local_identity'] != identity:
+                raise ValueError("Local sync root identity changed; explicit rebind required")
+            root_id = binding['remote_id']
+            metadata = self.client.get_metadata(root_id)
+            if metadata.trashed or not metadata.is_folder:
+                raise ValueError("Bound remote sync root unavailable; explicit rebind required")
+        else:
+            if qa.current_policy():
+                root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+            elif self.pair.direction == "down_only":
+                # Resolving a download source must be read-only. A typo, moved
+                # folder or revoked access is not authority to create cloud data.
+                root_id = "root"
+                parts = self.pair.remote_folder.replace("\\", "/").split("/")
+                for part in (part.strip() for part in parts if part.strip()):
+                    found = self.client.find_folder(part, root_id)
+                    if found is None:
+                        raise ValueError("Download source Drive folder is missing or inaccessible")
+                    root_id = found
+            else:
+                root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+            self.db.set_meta(self._binding_key, json.dumps({'local_identity': identity, 'remote_id': root_id}))
+        self._root_identity = identity
+        self._bound_root_id = root_id
+        self.pair_id = 'v2:' + hashlib.sha256((self._scope + '|' + root_id).encode()).hexdigest()
+        return root_id
 
     # ---------------------------------------------------------- Changes API
     def _consume_changes(self, page_token: str) -> tuple[bool, str]:
@@ -693,6 +763,7 @@ class TwoWaySyncEngine:
         seen_pages = {page_token}
         had_changes = False
         while True:
+            self._check_cancel()
             changes, next_page, new_start = self.client.list_changes(page)
             had_changes = had_changes or bool(changes)
             if next_page:
@@ -705,63 +776,123 @@ class TwoWaySyncEngine:
                 raise RuntimeError("Drive Changes API did not return a resume token")
             return had_changes, new_start
 
-    def _scan_with_new_change_baseline(self) -> dict[str, RemoteEntry]:
-        """Establish a token around a correctness-first full tree scan."""
-        starter = getattr(self.client, "get_start_page_token", None)
-        lister = getattr(self.client, "list_changes", None)
-        if not callable(starter) or not callable(lister):
-            return self.scan_remote()
-        try:
-            baseline = starter()
-        except Exception as exc:
-            LOGGER.debug("Changes API start token unavailable; using full scan: %s", exc)
-            return self.scan_remote()
-
-        snapshot = self.scan_remote()
-        try:
-            changed_during_scan, resume = self._consume_changes(baseline)
-        except Exception as exc:
-            # The full scan remains authoritative.  Do not advance a token when
-            # its change window could not be verified.
-            LOGGER.debug("Changes API baseline failed; retaining full scan: %s", exc)
-            return snapshot
-        if changed_during_scan:
-            # A mutation may have landed in a folder already visited.  Repeat the
-            # full scan rather than trying a risky partial reconciliation.
-            snapshot = self.scan_remote()
-        self.db.set_change_token(self.change_token_key, resume)
-        return snapshot
-
     def _remote_for_run(self) -> dict[str, RemoteEntry]:
-        """Use Changes only to reuse a known-complete in-memory snapshot.
-
-        Any reported change, missing cache, invalid token, or API failure falls
-        back to a complete folder-tree scan.
-        """
+        root_id = self._bind_roots()
+        if qa.current_policy():
+            # QA capability boundaries forbid account-global Changes requests.
+            return self.scan_remote()
+        fingerprint = json.dumps([self._scope, root_id, asdict(self.rules), sorted(self._local_exclusions), self.pair.canonical_remote_ids], sort_keys=True, default=lambda value: sorted(value))
+        self._snapshot_key = 'remote-snapshot-v2:' + hashlib.sha256(fingerprint.encode()).hexdigest()
+        cached = self._read_remote_snapshot(root_id)
         token = self.db.get_change_token(self.change_token_key)
-        lister = getattr(self.client, "list_changes", None)
-        if not token or not callable(lister):
-            return self._scan_with_new_change_baseline()
-
+        if token and callable(getattr(self.client, 'list_changes', None)):
+            try:
+                changed, resume = self._consume_changes(token)
+                if cached is not None and cached['token'] == token and not changed:
+                    self._dir_ids = cached['directories']
+                    self._remote_dirs = set(self._dir_ids) - {''}
+                    self._suppressed = set(cached['suppressed'])
+                    self._remote_scan_errors = []
+                    entries = {item['rel']: RemoteEntry(**item) for item in cached['entries']}
+                    self._write_remote_snapshot(entries, resume)
+                    self.db.set_change_token(self.change_token_key, resume)
+                    return entries
+            except SyncCancelled:
+                raise
+            except Exception:
+                pass
+        self._invalidate_remote_snapshot()
+        baseline = None
         try:
-            changed, resume = self._consume_changes(token)
-        except Exception as exc:
-            LOGGER.debug("Changes API token failed; rebuilding with full scan: %s", exc)
-            return self._scan_with_new_change_baseline()
+            starter = getattr(self.client, 'get_start_page_token', None)
+            baseline = starter() if callable(starter) else None
+        except Exception:
+            pass
+        entries = self.scan_remote()
+        if baseline and not self._remote_scan_errors and not self._path_conflict_candidates:
+            try:
+                # Verify feed access, but keep the pre-scan cursor. Changes that
+                # land during this scan must force another inventory next cycle.
+                self._consume_changes(baseline)
+                self.db.set_change_token(self.change_token_key, baseline)
+                self._write_remote_snapshot(entries, baseline)
+            except SyncCancelled:
+                raise
+            except Exception:
+                pass
+        return entries
 
-        if self._remote_snapshot is not None and not changed:
-            self.db.set_change_token(self.change_token_key, resume)
-            return dict(self._remote_snapshot)
+    def _read_remote_snapshot(self, root_id: str) -> dict | None:
+        raw = self.db.get_meta(self._snapshot_key)
+        if not raw:
+            return None
+        try:
+            envelope = json.loads(raw)
+            cached = envelope['snapshot']
+            encoded = json.dumps(cached, sort_keys=True).encode()
+            if hashlib.sha256(encoded).hexdigest() != envelope['checksum']:
+                raise ValueError('Snapshot checksum mismatch')
+            if (cached['version'] != 1 or not isinstance(cached['token'], str) or
+                    not cached['token'] or cached['directories'].get('') != root_id):
+                raise ValueError('Invalid snapshot identity or cursor')
+            seen = set()
+            for item in cached['entries']:
+                entry = RemoteEntry(**item)
+                for part in entry.rel.split('/'):
+                    validate_component(part)
+                if entry.rel in seen or not entry.file_id or not entry.md5:
+                    raise ValueError('Invalid snapshot file entry')
+                seen.add(entry.rel)
+            for rel in set(cached['directories']) | set(cached['suppressed']):
+                if rel:
+                    for part in rel.split('/'):
+                        validate_component(part)
+            return cached
+        except (ValueError, KeyError, TypeError):
+            LOGGER.warning('Invalid remote snapshot; taking a full inventory')
+            return None
 
-        # A persisted token is useful across process restarts for detection, but
-        # sync_items is not a complete remote index.  Without an in-memory tree,
-        # or when anything changed, correctness requires a full scan.
-        snapshot = self.scan_remote()
-        self.db.set_change_token(self.change_token_key, resume)
-        return snapshot
+    def _unchanged_token(self, token: str) -> str | None:
+        seen = set()
+        while token:
+            self._check_cancel()
+            if token in seen or len(seen) >= 10000:
+                raise ValueError('Invalid Changes API pagination')
+            seen.add(token)
+            changes, next_page, new_start = self.client.list_changes(token)
+            if changes:
+                return None
+            if not next_page:
+                return new_start or None
+            token = next_page
+        return None
+
+    def _write_remote_snapshot(self, entries: dict[str, RemoteEntry], token: str | None) -> None:
+        if self._remote_scan_errors or self._path_conflict_candidates or not token:
+            return
+        snapshot = {
+            'version': 1,
+            'token': token,
+            'entries': [asdict(entries[rel]) for rel in sorted(entries)],
+            'directories': self._dir_ids,
+            'suppressed': sorted(self._suppressed),
+        }
+        checksum = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+        self.db.set_meta(self._snapshot_key, json.dumps({'snapshot': snapshot, 'checksum': checksum}))
+
+    def _invalidate_remote_snapshot(self) -> None:
+        # Invalidate before our own writes: even an interrupted mutation must not
+        # leave a pre-write inventory eligible for no-change reuse.
+        if self._snapshot_key:
+            self.db.set_meta(self._snapshot_key, '')
 
     # --------------------------------------------------------------- execute
     def run(self) -> SyncReport:
+        self._check_cancel()
+        with pair_lock(Path(self.pair.local_path).expanduser().absolute()):
+            return self._run_locked()
+
+    def _run_locked(self) -> SyncReport:
         qa.check_startup()
         qa.validate_pair(self.pair)
         self.client = qa.restrict_client(self.client)
@@ -779,13 +910,17 @@ class TwoWaySyncEngine:
 
         try:
             requested_root = Path(self.pair.local_path).expanduser()
-            if self.pair.direction == "down_only" and not requested_root.exists():
+            if self.pair.direction == "down_only" and not requested_root.exists() and not self.db.get_meta(self._binding_key):
                 if qa.current_policy():
                     qa.mkdir(requested_root)
                 else:
                     requested_root.mkdir(mode=0o700, parents=True)
             self.local_root = canonical_sync_root(requested_root)
+            self._suppressed.clear()
+            self._check_root()
             local = self.scan_local()
+        except SyncCancelled:
+            raise
         except Exception as exc:
             self._report_failure(report, f"local root scan failed: {exc}")
             return report
@@ -798,6 +933,13 @@ class TwoWaySyncEngine:
                 self._report_failure(report, f"local traversal incomplete: {error}")
             return report
 
+        try:
+            self._bind_roots()
+        except SyncCancelled:
+            raise
+        except Exception as exc:
+            self._report_failure(report, f"root binding failed: {exc}")
+            return report
         last = self.load_last()
         self._canonical_ids = {
             rel: entry.remote_id for rel, entry in last.items() if entry.remote_id
@@ -808,6 +950,8 @@ class TwoWaySyncEngine:
         }
         try:
             remote = self._remote_for_run()
+        except SyncCancelled:
+            raise
         except Exception as exc:
             report.remote_path_conflicts = self._path_conflicts({}, set(local))
             self._report_failure(report, f"remote tree scan failed: {exc}")
@@ -883,6 +1027,9 @@ class TwoWaySyncEngine:
                 )
             return report
 
+        local = {rel: entry for rel, entry in local.items() if not self._excluded(rel)}
+        remote = {rel: entry for rel, entry in remote.items() if not self._excluded(rel)}
+        last = {rel: entry for rel, entry in last.items() if not self._excluded(rel)}
         report.blocked_before_transfers = False
         self._sync_directories(report)
         actions = reconcile(local, remote, last,
@@ -892,12 +1039,17 @@ class TwoWaySyncEngine:
                   f"{len(actions)} action(s)")
         for a in actions:
             try:
+                self._check_cancel()
+                self._check_root()
                 self._apply(a, local, remote, report)
+            except SyncCancelled:
+                raise
             except Exception as exc:
                 report.failed += 1
                 report.errors.append(f"{a.kind.value} {a.rel}: {exc}")
                 LOGGER.exception("Sync action failed: %s %s", a.kind.value, a.rel)
 
+        self._check_cancel()
         self._check_completeness(local, remote, report)
         if report.unexplained_omissions == 0:
             synchronized_dirs = self._synchronized_directory_map()
@@ -934,12 +1086,16 @@ class TwoWaySyncEngine:
                     self._ensure_remote_dir(rel)
                     self._remote_dirs.add(rel)
                     report.folders_created_remote += 1
+                except SyncCancelled:
+                    raise
                 except Exception as exc:
                     self._report_failure(report, f"create remote folder {rel}: {exc}")
 
         if self.pair.direction in {"down_only", "two_way"}:
             for rel in sorted(self._remote_dirs, key=lambda p: (p.count("/"), p)):
                 try:
+                    self._check_cancel()
+                    self._check_root()
                     local_dir = safe_local_path(self.local_root, rel)
                     if local_dir.exists():
                         if not local_dir.is_dir():
@@ -950,6 +1106,8 @@ class TwoWaySyncEngine:
                         qa.mkdir(local_dir)
                         report.folders_created_local += 1
                     self._local_dirs.add(rel)
+                except SyncCancelled:
+                    raise
                 except Exception as exc:
                     self._report_failure(report, f"create local folder {rel}: {exc}")
 
@@ -1009,6 +1167,9 @@ class TwoWaySyncEngine:
         for part in rel_dir.split("/"):
             cur = f"{parent}/{part}" if parent else part
             if cur not in self._dir_ids:
+                self._check_cancel()
+                self._check_root()
+                self._invalidate_remote_snapshot()
                 finder = getattr(self.client, "find_folder", None)
                 fid = (finder(part, parent_id) if finder else None) or \
                     self.client.create_folder(part, parent_id)
@@ -1054,7 +1215,7 @@ class TwoWaySyncEngine:
             if existing is not None:
                 # This may be a locally disambiguated collision path.  Update
                 # media only so the original Drive name and parent stay intact.
-                self.client.update_file(existing.file_id, source)
+                self._upload(rel, "", existing)
                 fid = existing.file_id
             else:
                 parent_dir = str(Path(rel).parent.as_posix())
@@ -1063,9 +1224,9 @@ class TwoWaySyncEngine:
                 finder = getattr(self.client, "find_file", None)
                 fid = finder(Path(rel).name, parent_id) if callable(finder) else None
                 if fid:
-                    self.client.update_file(fid, source)
+                    self._upload(rel, parent_id, RemoteEntry(rel, fid, "", "", 0))
                 else:
-                    fid = self.client.upload_file(source, parent_id, Path(rel).name)
+                    fid = self._upload(rel, parent_id, None)
             meta = self.client.get_metadata(fid)
             remote[rel] = RemoteEntry(rel, fid, meta.modified_time or "",
                                       meta.md5_checksum or L.md5, meta.size or L.size,
@@ -1084,6 +1245,7 @@ class TwoWaySyncEngine:
             report.downloaded += 1
 
         elif a.kind == ActionKind.TRASH_REMOTE:
+            self._invalidate_remote_snapshot()
             self.client.trash(remote[rel].file_id)
             remote.pop(rel, None)
             self.db.delete_sync_item(self.pair_id, rel)
@@ -1092,9 +1254,10 @@ class TwoWaySyncEngine:
         elif a.kind == ActionKind.TRASH_LOCAL:
             src = safe_local_path(self.local_root, rel)
             if src.exists():
-                dest = safe_local_path(self.local_root, f"{LOCAL_TRASH}/{rel}")
-                qa.mkdir(dest.parent)
-                shutil.move(str(src), str(dest))
+                dest = self._reserve_backup(f"{LOCAL_TRASH}/{rel}")
+                with anchored_parent(self.local_root, rel) as (source_fd, name):
+                    with anchored_parent(self.local_root, dest.relative_to(self.local_root).as_posix()) as (dest_fd, dest_name):
+                        os.replace(name, dest_name, src_dir_fd=source_fd, dst_dir_fd=dest_fd)
             local.pop(rel, None)
             self.db.delete_sync_item(self.pair_id, rel)
             report.trashed_local += 1
@@ -1130,7 +1293,7 @@ class TwoWaySyncEngine:
             # Remote becomes a local conflict copy; local stays canonical and
             # updates the existing remote ID.
             self._download_remote(R, conflict_path)
-            self.client.update_file(R.file_id, canonical)
+            self._upload(rel, "", R)
             meta = self.client.get_metadata(R.file_id)
             remote[rel] = RemoteEntry(rel, R.file_id, meta.modified_time or "",
                                       meta.md5_checksum or L.md5, meta.size or L.size,
@@ -1149,8 +1312,9 @@ class TwoWaySyncEngine:
         else:
             # Local becomes a conflict copy; remote is downloaded/exported as
             # canonical.  This is always used for native Workspace documents.
-            qa.mkdir(conflict_path.parent)
-            qa.copy_file(canonical, conflict_path)
+            conflict_path = self._reserve_backup(conflict_rel)
+            conflict_rel = conflict_path.relative_to(self.local_root).as_posix()
+            self._copy_backup(rel, conflict_path)
             conflict_stat = conflict_path.stat()
             local[conflict_rel] = LocalEntry(
                 conflict_rel,
@@ -1189,8 +1353,117 @@ class TwoWaySyncEngine:
             index += 1
 
     def _download_remote(self, remote: RemoteEntry, dest: Path) -> Path:
-        if remote.is_google_doc:
-            return self.client.export_file(
-                remote.file_id, dest, remote.export_mime
-            )
-        return self.client.download_file(remote.file_id, dest)
+        if qa.current_policy():
+            self._check_cancel()
+            if remote.is_google_doc:
+                return self.client.export_file(remote.file_id, dest, remote.export_mime, progress_cb=self._check_cancel)
+            return self.client.download_file(remote.file_id, dest, progress_cb=self._check_cancel)
+        return self._download(remote, dest.relative_to(self.local_root).as_posix())
+
+    def _reserve_backup(self, rel: str) -> Path:
+        original = checked_path(self.local_root, rel)
+        for attempt in range(100):
+            self._check_cancel()
+            candidate = original if attempt == 0 else original.with_name(
+                f"{original.stem} ({uuid.uuid4().hex}){original.suffix}")
+            candidate_rel = candidate.relative_to(self.local_root).as_posix()
+            with anchored_parent(self.local_root, candidate_rel, create=True) as (parent_fd, name):
+                try:
+                    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                                 0o600, dir_fd=parent_fd)
+                except FileExistsError:
+                    continue
+                os.close(fd)
+                return candidate
+        raise FileExistsError("Could not reserve a unique backup name")
+
+    def _copy_backup(self, rel: str, dest: Path):
+        if qa.current_policy():
+            qa.copy_file(self.local_root / rel, dest)
+            return
+        with opened_source(self.local_root, rel) as source:
+            dest_rel = dest.relative_to(self.local_root).as_posix()
+            with anchored_parent(self.local_root, dest_rel) as (parent_fd, name):
+                fd = os.open(name, os.O_WRONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                with os.fdopen(fd, 'wb') as output, source.open('rb') as input_file:
+                    shutil.copyfileobj(input_file, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+
+    def _upload(self, rel: str, parent_id: str, existing: RemoteEntry | None) -> str:
+        self._check_cancel()
+        self._invalidate_remote_snapshot()
+        with opened_source(self.local_root, rel) as path:
+            if existing:
+                updater = getattr(self.client, 'update_file', None)
+                if updater is None:
+                    raise ValueError("Drive adapter cannot safely update existing files by ID")
+                return updater(existing.file_id, path, progress_cb=self._check_cancel)
+            return self.client.upload_file(path, parent_id, Path(rel).name,
+                                           progress_cb=self._check_cancel)
+
+    def _download(self, remote: RemoteEntry, rel: str) -> Path:
+        self._check_cancel()
+        dest = checked_path(self.local_root, rel)
+        with anchored_parent(self.local_root, rel, create=True) as (parent_fd, name):
+            directory = Path(f'/proc/self/fd/{parent_fd}')
+            fd, temporary_name = tempfile.mkstemp(prefix='.electridrive-', suffix='.part', dir=directory)
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                if remote.is_google_doc:
+                    self.client.export_file(remote.file_id, temporary, remote.export_mime, progress_cb=self._check_cancel)
+                else:
+                    self.client.download_file(remote.file_id, temporary, progress_cb=self._check_cancel)
+                self._check_cancel()
+                if not remote.is_google_doc and (md5_file(temporary) != remote.md5 or temporary.stat().st_size != remote.size):
+                    raise ValueError(f"Downloaded content failed integrity check: {rel}")
+                self._check_root()
+                checked_path(self.local_root, rel)
+                self._publish_download(temporary.name, parent_fd, name, rel)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return dest
+
+    def _publish_download(self, temporary_name: str, parent_fd: int, name: str, rel: str) -> None:
+        """Preserve the live inode before publishing, including concurrent edits.
+
+        A stat comparison alone has a race between checking and replacing. Move
+        any live destination into a unique recovery slot instead, then use an
+        atomic no-clobber link so a newly created destination also survives.
+        Writers already holding the old inode continue writing the recovery copy.
+        """
+        recovery_rel = None
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            recovery = self._reserve_backup(f"{LOCAL_TRASH}/overwritten/{rel}")
+            candidate_rel = recovery.relative_to(self.local_root).as_posix()
+            with anchored_parent(self.local_root, candidate_rel) as (recovery_fd, recovery_name):
+                try:
+                    os.replace(name, recovery_name, src_dir_fd=parent_fd, dst_dir_fd=recovery_fd)
+                except FileNotFoundError:
+                    # The destination disappeared meanwhile; remove only our
+                    # unused reservation and still publish without clobbering.
+                    os.unlink(recovery_name, dir_fd=recovery_fd)
+                else:
+                    recovery_rel = candidate_rel
+        try:
+            self._check_cancel()
+            os.link(temporary_name, name, src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd, follow_symlinks=False)
+        except BaseException:
+            if recovery_rel is not None:
+                # Restore the old inode when publication was cancelled/failed,
+                # but never overwrite a file another process created meanwhile.
+                with anchored_parent(self.local_root, recovery_rel) as (recovery_fd, recovery_name):
+                    try:
+                        os.link(recovery_name, name, src_dir_fd=recovery_fd,
+                                dst_dir_fd=parent_fd, follow_symlinks=False)
+                    except FileExistsError:
+                        pass
+                    except OSError:
+                        LOGGER.exception('Could not restore destination; preserved at %s', recovery_rel)
+            raise
