@@ -173,6 +173,7 @@ def send_email(msg: EmailMessage) -> None:
     user = os.environ.get("SMTP_USER")
     password = os.environ.get("SMTP_PASS")
     accepted = False
+    uncertain = False
     try:
         with smtplib.SMTP(host, port, timeout=30) as smtp:
             smtp.starttls(context=ssl.create_default_context())
@@ -185,11 +186,16 @@ def send_email(msg: EmailMessage) -> None:
                 # Explicit pre-DATA failure or negative SMTP response is definite.
                 raise
             except (smtplib.SMTPServerDisconnected, OSError) as exc:
+                uncertain = True
                 raise SMTPDeliveryUncertain("SMTP acceptance requires reconciliation") from exc
             if refused:
                 raise smtplib.SMTPRecipientsRefused(refused)
             accepted = True
     except Exception:
+        # SMTP.__exit__ can replace a DATA exception with its own QUIT error.
+        # Once acceptance is uncertain, cleanup cannot make it safe to retry.
+        if uncertain:
+            raise SMTPDeliveryUncertain("SMTP acceptance requires reconciliation") from None
         # QUIT/disconnect after accepted DATA cannot undo SMTP acceptance.
         if not accepted:
             raise

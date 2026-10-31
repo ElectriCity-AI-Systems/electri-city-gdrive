@@ -152,3 +152,20 @@ def test_refreshed_token_checks_actual_grants_before_save(monkeypatch):
     with pytest.raises(oauth.OAuthError, match='scope'):
         oauth.authenticate_interactive()
     assert path.read_text() == 'saved refresh token'
+
+
+@pytest.mark.parametrize('operation', ['load_credentials', 'has_saved_token'])
+@pytest.mark.parametrize('malformed', ['null', '[]', '"invalid token"', '42'])
+def test_existing_nonobject_fallback_never_restores_stale_keyring(monkeypatch, operation, malformed):
+    path = get_paths().token_fallback_file
+    path.write_text(malformed)
+    keyring_reads = []
+    def stale_token():
+        keyring_reads.append(True)
+        return json.dumps({'token': 'stale-account', 'refresh_token': 'refresh',
+            'client_id': 'client', 'client_secret': 'secret', 'scopes': [DEFAULT_SCOPE]})
+    monkeypatch.setattr(oauth, '_try_keyring_get', stale_token)
+    with pytest.raises(oauth.OAuthError, match='token'):
+        getattr(oauth, operation)()
+    assert keyring_reads == []
+    assert path.read_text() == malformed

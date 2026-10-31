@@ -45,6 +45,13 @@ def _try_keyring_set(token_json: str) -> bool:
         return False
 
 
+def _parse_token_json(raw: str | bytes) -> dict[str, Any]:
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise OAuthError("Invalid saved token metadata.")
+    return data
+
+
 def _load_token_from_file(path: Path) -> dict[str, Any] | None:
     policy = current_policy()
     if policy:
@@ -52,11 +59,11 @@ def _load_token_from_file(path: Path) -> dict[str, Any] | None:
         if path != get_paths().token_fallback_file:
             raise OAuthError("QA token path mismatch")
         check_profile_file(path, strict=True)
-        return json.loads(_read(path)) if path.exists() else None
+        return _parse_token_json(_read(path)) if path.exists() else None
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _parse_token_json(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise OAuthError("Could not read saved token file.") from exc
 

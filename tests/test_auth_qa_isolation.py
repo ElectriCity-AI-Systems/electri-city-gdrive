@@ -86,3 +86,13 @@ def test_qa_own_client_shared_resolver(profile):
     qa._write(get_paths().config_dir / 'app_client.json', {'installed': {'client_id': 'qa-other'}})
     assert app_client.client_id() == 'qa-own'
     assert app_client.client_config()['installed']['client_id'] == 'qa-own'
+
+
+@pytest.mark.parametrize('operation', ['load_credentials', 'has_saved_token'])
+def test_qa_null_token_fails_closed_without_normal_sources(profile, operation):
+    path = get_paths().token_fallback_file
+    qa._write(path, None)
+    before = path.read_bytes()
+    with pytest.raises(oauth.OAuthError, match='token'):
+        getattr(oauth, operation)()
+    assert path.read_bytes() == before

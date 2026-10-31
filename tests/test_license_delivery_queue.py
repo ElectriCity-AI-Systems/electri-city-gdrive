@@ -296,3 +296,37 @@ def test_startup_and_health_do_not_send_or_initialize(configured, monkeypatch):
     monkeypatch.setattr(ls, 'send_email', lambda *args: pytest.fail('health delivered mail'))
     assert ls.create_app().test_client().get('/health').json == {'ok': True}
     assert not ls.delivery_path().exists()
+
+
+@pytest.mark.parametrize('data_error', [OSError, ls.smtplib.SMTPServerDisconnected])
+@pytest.mark.parametrize('cleanup_error', ['negative-response', 'oserror'])
+def test_real_smtp_exit_cannot_turn_uncertain_data_into_retry(
+        configured, monkeypatch, data_error, cleanup_error):
+    attempts = []
+    class SMTP(ls.smtplib.SMTP):
+        # Inherit the real stdlib __enter__/__exit__: QUIT can replace the
+        # exception raised by send_message with SMTPResponseException.
+        def __init__(self, *args, **kwargs):
+            pass
+        def starttls(self, **kwargs):
+            pass
+        def send_message(self, msg):
+            attempts.append(msg)
+            raise data_error('DATA acceptance unknown')
+        def docmd(self, command):
+            assert command == 'QUIT'
+            if cleanup_error == 'oserror':
+                raise OSError('QUIT connection lost')
+            return 500, b'QUIT rejected'
+        def close(self):
+            pass
+    monkeypatch.setenv('SMTP_HOST', 'dummy.example.test')
+    monkeypatch.delenv('SMTP_USER', raising=False)
+    monkeypatch.setattr(ls.smtplib, 'SMTP', SMTP)
+    monkeypatch.setattr(ls, 'send_email', REAL_SEND_EMAIL)
+    app = ls.create_app()
+    assert app.test_client().post('/paypal/ipn', data=configured).status_code == 500
+    assert rows()[0]['status'] == 'sending'
+    assert ls.retry_deliveries() == 0
+    assert app.test_client().post('/paypal/ipn', data=configured).status_code == 200
+    assert len(attempts) == 1
