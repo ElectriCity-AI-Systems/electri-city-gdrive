@@ -2,7 +2,7 @@
 
 Flow: PayPal sends an IPN (Instant Payment Notification) for each completed donation
 to this server → we verify it back with PayPal → sign an Ed25519 license key (same
-scheme as the app) → email it to the donor. No license database needed.
+scheme as the app) → durably queue and email it to the donor.
 
 The signing/grant helpers are stdlib-only and unit-tested; Flask and requests are
 imported lazily so the logic is testable and the dependency surface stays small.
@@ -33,6 +33,7 @@ from pathlib import Path
 # Make the electridrive package importable when run from the repo.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from electridrive import licensing  # noqa: E402
+from server import delivery_store  # noqa: E402
 
 LOGGER = logging.getLogger("electridrive.license_server")
 
@@ -65,10 +66,12 @@ def should_grant(
     product_value: str | None = None,
 ) -> tuple[bool, str]:
     """Decide whether a (already PayPal-verified) IPN should yield a license."""
+    if not receiver_email.strip():
+        return False, "receiver not configured"
     if form.get("payment_status") != "Completed":
         return False, "payment not completed"
     receiver = (form.get("receiver_email") or form.get("business") or "").lower()
-    if receiver_email and receiver != receiver_email.lower():
+    if receiver != receiver_email.strip().lower():
         return False, "receiver mismatch"
     try:
         amount = Decimal(form.get("mc_gross", "0") or "0")
@@ -123,8 +126,12 @@ def processing_lock():
 
 
 def already_processed(txn_id: str) -> bool:
+    if not valid_txn_id(txn_id):
+        return False
     p = _processed_path()
-    return p.exists() and txn_id in p.read_text(encoding="utf-8").split()
+    if p.exists() and txn_id in p.read_text(encoding="utf-8").split():
+        return True
+    return delivery_store.accepted(delivery_path(), txn_id)
 
 
 def mark_processed(txn_id: str) -> None:
@@ -156,18 +163,113 @@ def build_message(to_email: str, name: str, key: str) -> EmailMessage:
     return msg
 
 
+class SMTPDeliveryUncertain(RuntimeError):
+    """SMTP DATA may have been accepted; automatic replay is unsafe."""
+
+
 def send_email(msg: EmailMessage) -> None:
     host = os.environ["SMTP_HOST"]
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER")
     password = os.environ.get("SMTP_PASS")
-    with smtplib.SMTP(host, port, timeout=30) as smtp:
-        smtp.starttls(context=ssl.create_default_context())
-        if user:
-            smtp.login(user, password)
-        refused = smtp.send_message(msg)
-        if refused:
-            raise smtplib.SMTPRecipientsRefused(refused)
+    accepted = False
+    try:
+        with smtplib.SMTP(host, port, timeout=30) as smtp:
+            smtp.starttls(context=ssl.create_default_context())
+            if user:
+                smtp.login(user, password)
+            try:
+                refused = smtp.send_message(msg)
+            except (smtplib.SMTPResponseException, smtplib.SMTPRecipientsRefused,
+                    smtplib.SMTPNotSupportedError):
+                # Explicit pre-DATA failure or negative SMTP response is definite.
+                raise
+            except (smtplib.SMTPServerDisconnected, OSError) as exc:
+                raise SMTPDeliveryUncertain("SMTP acceptance requires reconciliation") from exc
+            if refused:
+                raise smtplib.SMTPRecipientsRefused(refused)
+            accepted = True
+    except Exception:
+        # QUIT/disconnect after accepted DATA cannot undo SMTP acceptance.
+        if not accepted:
+            raise
+
+
+def delivery_path() -> Path:
+    return Path(os.environ.get("DELIVERY_DB", str(_processed_path().with_name("deliveries.sqlite"))))
+
+
+def _initialize_deliveries() -> None:
+    delivery_store.initialize(delivery_path(), _processed_path(), valid_txn_id)
+
+
+def enqueue_delivery(form: dict) -> None:
+    """Persist one immutable verified, eligible receipt before attempting SMTP."""
+    txn = form.get("txn_id", "").strip()
+    if not valid_txn_id(txn):
+        raise ValueError("invalid transaction ID")
+    name, email = payer_identity(form)
+    with processing_lock():
+        _initialize_deliveries()
+        delivery_store.enqueue(delivery_path(), txn, name, email, form,
+                               os.environ.get("PAYPAL_PRODUCT_FIELD", "").strip())
+
+
+def _deliver_transaction(txn_id: str) -> bool:
+    # Caller holds the same advisory lock as migration and owner-only resend.
+    path = delivery_path()
+    if already_processed(txn_id):
+        return False
+    receipt = delivery_store.claim(path, txn_id)
+    if receipt is None:
+        return False
+    try:
+        key = receipt["license_key"]
+        message_id = receipt["message_id"]
+        if not key:
+            key = issue_key(receipt["name"], receipt["email"])
+            message_id = make_msgid()
+            delivery_store.save_key(path, txn_id, key, message_id)
+        msg = build_message(receipt["email"], receipt["name"], key)
+        if isinstance(msg, EmailMessage):
+            if msg.get("Message-ID"):
+                msg.replace_header("Message-ID", message_id)
+            else:
+                msg["Message-ID"] = message_id
+        send_email(msg)
+    except SMTPDeliveryUncertain:
+        # Remain sending, including across restarts and duplicate callbacks.
+        raise
+    except Exception as exc:
+        delivery_store.set_status(path, txn_id, "retry", type(exc).__name__)
+        raise
+    # Neither failure here may replay an SMTP-accepted message. Keep sending.
+    mark_processed(txn_id)
+    delivery_store.set_status(path, txn_id, "sent")
+    LOGGER.info("SMTP accepted license mail: txn_id=%s message_id=%s; recipient inbox unconfirmed",
+                txn_id, message_id)
+    return True
+
+
+def deliver_transaction(txn_id: str) -> bool:
+    if not valid_txn_id(txn_id):
+        raise ValueError("invalid transaction ID")
+    with processing_lock():
+        _initialize_deliveries()
+        return _deliver_transaction(txn_id)
+
+
+def retry_deliveries() -> int:
+    """Retry definite failures only; never reclaim uncertain sending attempts."""
+    delivered = 0
+    with processing_lock():
+        _initialize_deliveries()
+        for txn in delivery_store.pending(delivery_path()):
+            try:
+                delivered += _deliver_transaction(txn)
+            except Exception as exc:
+                LOGGER.error("License retry failed: txn_id=%s (%s)", txn, type(exc).__name__)
+    return delivered
 
 
 def verify_with_paypal(raw_body: bytes) -> bool:
@@ -192,6 +294,8 @@ def create_app():
     # Flask routes its application logger to the Gunicorn error stream.
     app.logger.setLevel(logging.INFO)
     receiver = os.environ.get("PAYPAL_RECEIVER_EMAIL", "").strip()
+    if not receiver:
+        raise ValueError("PAYPAL_RECEIVER_EMAIL is required")
     min_amount = Decimal(os.environ.get("MIN_AMOUNT", "0") or "0")
     expected_currency = os.environ.get("PAYPAL_CURRENCY", "EUR").strip().upper()
     product_field = os.environ.get("PAYPAL_PRODUCT_FIELD", "").strip()
@@ -229,31 +333,16 @@ def create_app():
             return ("", 200)
 
         try:
-            # Keep the lock through SMTP acceptance and durable persistence so
-            # concurrent deliveries for one txn cannot both pass the dedupe check.
-            with processing_lock():
-                if already_processed(txn):
-                    return ("", 200)
-                ok, reason = should_grant(
-                    form, receiver, min_amount, expected_currency or None,
-                    product_field, product_value
-                )
-                if not ok:
-                    # This safe reason code contains no payer details or amounts.
-                    app.logger.info("Verified IPN declined: txn_id=%s reason=%s", txn, reason)
-                    return ("", 200)
-                if not receiver:
-                    # A missing merchant identity is configuration failure, not a
-                    # reason to grant a verified payment to an arbitrary receiver.
-                    LOGGER.error("Verified IPN cannot be processed: receiver not configured")
-                    return ("", 500)
-                name, email = payer_identity(form)
-                key = issue_key(name, email)
-                msg = build_message(email, name, key)
-                send_email(msg)
-                mark_processed(txn)
-                msg_ref = msg.get("Message-ID", "-") if hasattr(msg, "get") else "-"
-                app.logger.info("SMTP accepted license mail: txn_id=%s message_id=%s; recipient inbox unconfirmed", txn, msg_ref)
+            # Check eligibility on every callback, but never replace a saved receipt.
+            ok, reason = should_grant(
+                form, receiver, min_amount, expected_currency or None,
+                product_field, product_value
+            )
+            if not ok:
+                app.logger.info("Verified IPN declined: txn_id=%s reason=%s", txn, reason)
+                return ("", 200)
+            enqueue_delivery(form)
+            deliver_transaction(txn)
         except Exception as exc:
             # Do not log exception text: SMTP errors can include payer addresses.
             LOGGER.error(

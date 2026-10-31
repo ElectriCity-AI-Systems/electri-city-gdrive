@@ -24,7 +24,7 @@ def load_service_env(path: Path) -> None:
     """Load the root-owned systemd EnvironmentFile without executing shell code."""
     accepted = {
         "PAYPAL_ENV", "PAYPAL_RECEIVER_EMAIL", "PAYPAL_CURRENCY", "MIN_AMOUNT",
-        "SIGNING_KEY_PATH", "PROCESSED_FILE", "SMTP_HOST", "SMTP_PORT",
+        "SIGNING_KEY_PATH", "PROCESSED_FILE", "DELIVERY_DB", "SMTP_HOST", "SMTP_PORT",
         "SMTP_USER", "SMTP_PASS", "MAIL_FROM", "MAIL_SUBJECT",
     }
     for line in path.read_text(encoding="utf-8").splitlines():

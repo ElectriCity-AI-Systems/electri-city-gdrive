@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically retry definite ElectriDrive Pro delivery failures
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Unit=electridrive-license-retry.service
+
+[Install]
+WantedBy=timers.target
