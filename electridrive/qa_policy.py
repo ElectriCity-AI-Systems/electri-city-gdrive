@@ -108,7 +108,7 @@ def _write(path, value):
         try:
             os.unlink(name, dir_fd=directory)
         except FileNotFoundError:
-            pass
+            pass  # already moved into place by the os.replace() above
         os.close(directory)
     return data
 
@@ -217,7 +217,7 @@ class QaPolicy:
                     try:
                         os.mkdir(part, mode=0o700, dir_fd=fd)
                     except FileExistsError:
-                        pass
+                        pass  # idempotent: the directory only needs to exist
                 child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 os.close(fd)
                 fd = child
@@ -262,7 +262,7 @@ class QaPolicy:
                 try:
                     os.unlink(temporary, dir_fd=parent)
                 except FileNotFoundError:
-                    pass
+                    pass  # already linked into place by the os.replace() above
 
 
 def initialize(profile, local_root):

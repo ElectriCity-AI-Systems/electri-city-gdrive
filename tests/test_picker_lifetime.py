@@ -115,7 +115,7 @@ def test_dripping_partial_request_cannot_extend_overall_deadline(monkeypatch):
                     client.sendall(b'G')
                     time.sleep(0.02)
             except OSError:
-                pass
+                pass  # server is expected to close/reset once its deadline fires
         thread = Thread(target=drip, daemon=True)
         senders.append(thread)
         thread.start()

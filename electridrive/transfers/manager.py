@@ -193,6 +193,9 @@ class TransferManager:
         from electridrive.qa_drive import QaDriveClient
         base = QaDriveClient if isinstance(client, QaDriveClient) else object
         class PlanningClient(base):
+            # Intentionally skips QaDriveClient.__init__: this proxy only needs
+            # the isinstance() identity, not its state — every attribute access
+            # below is redirected to the already-initialized wrapped `client`.
             def __init__(self):
                 pass
 
@@ -510,7 +513,7 @@ class TransferManager:
                 try:
                     os.unlink(temporary, dir_fd=parent_fd)
                 except FileNotFoundError:
-                    pass
+                    pass  # already linked into place by the os.link() above
 
     def _save(self, t: Transfer, state: TransferState | None = None) -> None:
         if self._journal is not None:

@@ -93,7 +93,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 self.request.shutdown(socket.SHUT_RDWR)
             except OSError:
-                pass
+                pass  # socket already closed by the client or handle()
         self._deadline_timer = Timer(remaining, expire)
         self._deadline_timer.daemon = True
         self._deadline_timer.start()
@@ -102,7 +102,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             super().handle()
         except (TimeoutError, ConnectionError):
-            pass
+            pass  # expected when the deadline timer aborts a dripping/stalled request
 
     def finish(self):
         self._deadline_timer.cancel()
