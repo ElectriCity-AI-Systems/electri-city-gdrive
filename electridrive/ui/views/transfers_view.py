@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -58,6 +59,9 @@ class TransfersView(QWidget):
         self.scroll.hide()
 
         session.transfer_changed.connect(self.on_transfer)
+        if session.transfers:
+            for transfer in session.transfers.snapshot():
+                self.on_transfer(transfer)
 
     def on_transfer(self, t):
         row = self._rows.get(t.id)
@@ -91,7 +95,7 @@ class TransfersView(QWidget):
         if state == "done":
             return f"Done · {format_size(t.total or t.bytes_done)}"
         if state == "failed":
-            return "Failed · retry"
+            return f"Failed · {t.error or 'retry'}"
         if state == "canceled":
             return "Canceled"
         return state
@@ -118,7 +122,16 @@ class TransfersView(QWidget):
 
     def _retry(self, transfer_id: int):
         if self._session.transfers:
-            self._session.transfers.retry(transfer_id)
+            task = self._session.transfers.get(transfer_id)
+            if task and task.recovered and task.kind.value == "upload":
+                if QMessageBox.question(self, "Retry interrupted upload?",
+                    "This upload may already exist on Drive. Check the destination before "
+                    "retrying to avoid a duplicate. Retry anyway?") != QMessageBox.Yes:
+                    return
+            try:
+                self._session.transfers.retry(transfer_id)
+            except Exception as exc:
+                QMessageBox.warning(self, "Could not retry transfer", str(exc))
 
     def _clear_finished(self):
         for tid in list(self._rows):

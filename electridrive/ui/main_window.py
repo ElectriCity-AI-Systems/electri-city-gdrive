@@ -297,8 +297,14 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
 
     def closeEvent(self, event):
-        self.session.shutdown()
-        super().closeEvent(event)
+        try:
+            self.session.shutdown()
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Could not close", str(exc))
+            event.ignore()
+            return
+        event.accept()
 
 
 def run_app() -> int:

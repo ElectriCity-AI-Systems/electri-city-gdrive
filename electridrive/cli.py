@@ -12,7 +12,6 @@ from electridrive.config import SyncPair, get_paths, load_settings, selected_sco
 from electridrive.google_api.client import GoogleDriveClient
 from electridrive.logging_setup import configure_logging
 from electridrive.storage.database import SyncDatabase
-from electridrive.sync.downloader import plan_download
 from electridrive.sync.engine import UploadOnlySyncEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +61,10 @@ def cmd_sync_up(args: argparse.Namespace) -> int:
 def cmd_sync(args: argparse.Namespace) -> int:
     from electridrive.sync.twoway import TwoWaySyncEngine
 
+    from electridrive.sync_schedule import periodic_sync, validate_interval
+    interval = getattr(args, "interval", None)
+    if interval is not None:
+        validate_interval(interval)
     paths = get_paths()
     db = SyncDatabase(paths.database_file)
     try:
@@ -70,13 +73,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         delete_policy="off" if qa.current_policy() else "trash")
         qa.validate_pair(pair)
         engine = TwoWaySyncEngine(GoogleDriveClient(), db, pair, log_cb=print)
-        report = engine.run()
-        print(f"Done. up={report.uploaded} down={report.downloaded} "
-              f"trash_remote={report.trashed_remote} trash_local={report.trashed_local} "
-              f"conflicts={report.conflicts} failed={report.failed}")
-        for err in report.errors:
-            print(f"  ! {err}")
-        return 0 if report.failed == 0 else 2
+        def run():
+            qa.check_startup()
+            qa.validate_pair(pair)
+            return engine.run()
+        reports = periodic_sync(run, interval) if interval is not None else (run(),)
+        failed = False
+        for report in reports:
+            print(f"Done. up={report.uploaded} down={report.downloaded} "
+                  f"trash_remote={report.trashed_remote} trash_local={report.trashed_local} "
+                  f"conflicts={report.conflicts} failed={report.failed}")
+            for err in report.errors:
+                print(f"  ! {err}")
+            failed = failed or bool(report.failed or report.unexplained_omissions)
+        return 2 if failed else 0
     finally:
         db.close()
 
@@ -107,19 +117,21 @@ def cmd_download(args: argparse.Namespace) -> int:
     client = qa.restrict_client(GoogleDriveClient())
     remote = client.get_metadata(args.file_id)
     dest = Path(args.dest).expanduser()
-    items = plan_download(client, remote, dest)
-    failed = 0
-    for it in items:
-        try:
-            if it.is_google_doc:
-                client.export_file(it.file_id, it.dest_path, it.export_mime)
+    from electridrive.transfers import TransferManager, TransferState
+    manager = TransferManager(client)
+    try:
+        manager.enqueue_download(remote, dest)
+        manager.wait_idle()
+        failed = 0
+        for transfer in manager.snapshot():
+            if transfer.state == TransferState.DONE:
+                print(f"downloaded {transfer.dest_path}")
             else:
-                client.download_file(it.file_id, it.dest_path)
-            print(f"downloaded {it.dest_path}")
-        except Exception as exc:
-            failed += 1
-            print(f"FAILED {it.name}: {exc}")
-    return 0 if failed == 0 else 2
+                failed += 1
+                print(f"FAILED {transfer.name}: {transfer.error or transfer.state.value}")
+        return 0 if failed == 0 else 2
+    finally:
+        manager.shutdown(wait=True)
 
 
 def cmd_mount(args: argparse.Namespace) -> int:
@@ -157,7 +169,11 @@ def cmd_unmount(args: argparse.Namespace) -> int:
     if not tool:
         print("fusermount not found.")
         return 1
-    subprocess.run([tool, "-u", args.mountpoint], check=False)
+    result = subprocess.run([tool, "-u", args.mountpoint], check=False,
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        print(f"Unmount failed: {getattr(result, 'stderr', '') or result.returncode}")
+        return 1
     print(f"Unmounted {args.mountpoint}")
     return 0
 
@@ -190,6 +206,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--remote-folder", required=True)
     p_sync.add_argument("--direction", choices=["two_way", "up_only", "down_only"],
                         default="two_way")
+    p_sync.add_argument("--interval", type=float,
+                        help="Repeat sequentially every N seconds; stop on sync errors")
     p_sync.set_defaults(func=cmd_sync)
 
     sub.add_parser(

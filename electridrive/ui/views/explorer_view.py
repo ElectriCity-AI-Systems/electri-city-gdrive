@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import weakref
+from shiboken6 import isValid
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QStandardItem, QStandardItemModel
@@ -212,30 +214,52 @@ class ExplorerView(QWidget):
         self._rebuild_breadcrumb()
         self.status.emit("Loading…")
 
+        client = self._session.client
+        view_ref = weakref.ref(self)
+        parent = self.current_id
+        query = self.query
+        def live_view():
+            view = view_ref()
+            return view if view is not None and isValid(view) else None
+        def error(message):
+            view = live_view()
+            if view and token == view._load_token:
+                view._on_error(message)
+        def populate(files):
+            view = live_view()
+            if view:
+                view._populate(files, token, parent)
         if self.mode == "my_drive":
             parent = self.current_id
-            self._session.submit(
-                lambda: self._session.client.list_folder(parent).files,
-                lambda files: self._populate(files, token),
-                self._on_error,
-            )
+            def fetch():
+                files, page, seen = [], None, set()
+                while True:
+                    listing = client.list_folder(parent, page)
+                    files.extend(listing.files)
+                    page = listing.next_page_token
+                    if not page:
+                        return files
+                    if page in seen:
+                        raise RuntimeError("Drive folder listing returned a repeated page token")
+                    seen.add(page)
+            self._session.submit(fetch, populate, error)
         else:
             fetchers = {
-                "recent": lambda: self._session.client.list_files(limit=100),
-                "starred": lambda: self._session.client.list_starred(),
-                "trash": lambda: self._session.client.list_trash(),
-                "search": lambda: self._session.client.search(self.query) if self.query else [],
+                "recent": lambda: client.list_files(limit=100),
+                "starred": lambda: client.list_starred(),
+                "trash": lambda: client.list_trash(),
+                "search": lambda: client.search(query) if query else [],
             }
             self._session.submit(fetchers[self.mode],
-                                 lambda files: self._populate(files, token),
-                                 self._on_error)
+                                 populate,
+                                 error)
 
-    def _populate(self, files, token):
+    def _populate(self, files, token, parent=None):
         if token != self._load_token:
             return  # a newer navigation superseded this result
         self.model.removeRows(0, self.model.rowCount())
         if self.mode == "my_drive":
-            self._session.db.cache_remote_children(self.current_id, files)
+            self._session.db.cache_remote_children(parent or self.current_id, files)
         for f in files:
             icon_name = "folder" if f.is_folder else "file"
             name_item = QStandardItem(icons.icon(icon_name, self._p.accent if f.is_folder
@@ -287,10 +311,11 @@ class ExplorerView(QWidget):
         if self.mode != "my_drive":
             QMessageBox.information(self, "Upload", "Switch to My Drive to upload here.")
             return
-        for p in paths:
-            self._session.transfers.enqueue_upload(Path(p), self.current_id)
-        self.status.emit(f"Queued upload of {len(paths)} item(s)")
-        self.open_transfers.emit()
+        manager, parent, paths = self._session.transfers, self.current_id, tuple(paths)
+        def plan():
+            return sum(len(manager.enqueue_upload(Path(path), parent)) for path in paths)
+        self._session.submit(plan, self._planned, self._on_error)
+        self.status.emit("Planning uploads…")
 
     def _add_from_drive(self):
         if not self._session.client:
@@ -318,16 +343,23 @@ class ExplorerView(QWidget):
         dest = QFileDialog.getExistingDirectory(self, "Download to…", str(Path.home() / "Downloads"))
         if not dest:
             return
-        for f in files:
-            self._session.transfers.enqueue_download(f, Path(dest))
-        self.status.emit(f"Queued download of {len(files)} item(s)")
+        manager, files, dest = self._session.transfers, tuple(files), Path(dest)
+        if manager:
+            def plan():
+                return sum(len(manager.enqueue_download(remote, dest)) for remote in files)
+            self._session.submit(plan, self._planned, self._on_error)
+            self.status.emit("Planning downloads…")
+
+    def _planned(self, count):
+        self.status.emit(f"Queued {count} transfer(s)")
         self.open_transfers.emit()
 
     def _new_folder(self):
         name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
         if ok and name.strip():
+            client, parent = self._session.client, self.current_id
             self._session.submit(
-                lambda: self._session.client.create_folder(name.strip(), self.current_id),
+                lambda: client.create_folder(name.strip(), parent),
                 lambda _id: self.load(),
                 self._on_error,
             )
@@ -355,8 +387,8 @@ class ExplorerView(QWidget):
                                 "They stay recoverable in Drive Trash.") != QMessageBox.Yes:
             return
         ids = [f.id for f in files]
-
+        client = self._session.client
         def do():
             for fid in ids:
-                self._session.client.trash(fid)
+                client.trash(fid)
         self._session.submit(do, lambda _: self.load(), self._on_error)

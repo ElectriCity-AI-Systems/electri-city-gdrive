@@ -1,24 +1,29 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, wait
+import itertools
+import threading
 import logging
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot
 
 from electridrive import qa_policy as qa
 from electridrive.config import Settings, get_paths, load_settings, save_settings
 from electridrive.storage.database import SyncDatabase
 
 LOGGER = logging.getLogger(__name__)
+_WORKER_IDS = itertools.count(1)
 
 
 class _WorkerSignals(QObject):
+    finished = Signal(object, object, object)
     result = Signal(object)
     error = Signal(str)
 
 
-class _Worker(QRunnable):
+class _Worker:
     def __init__(self, fn, *args, **kwargs):
-        super().__init__()
+        self.worker_id = next(_WORKER_IDS)
         self._fn = fn
         self._args = args
         self._kwargs = kwargs
@@ -26,26 +31,52 @@ class _Worker(QRunnable):
 
     @Slot()
     def run(self):
+        result, error = None, None
         try:
             qa.check_startup()
             result = self._fn(*self._args, **self._kwargs)
         except Exception as exc:  # surfaced to the UI via the error signal
             LOGGER.exception("Background task failed")
-            self.signals.error.emit(str(exc))
+            error = str(exc)
+            self.signals.error.emit(error)
         else:
             self.signals.result.emit(result)
+        finally:
+            self.signals.finished.emit(self.worker_id, result, error)
+
+
+class _WorkerPool:
+    """Python workers avoid Qt's retained QRunnable ownership after completion."""
+
+    def __init__(self):
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="drive-session")
+        self._futures = set()
+        self._lock = threading.Lock()
+
+    def start(self, worker):
+        with self._lock:
+            self._futures = {future for future in self._futures if not future.done()}
+            self._futures.add(self._executor.submit(worker.run))
+
+    def waitForDone(self, milliseconds=-1):
+        with self._lock:
+            futures = tuple(self._futures)
+        _done, pending = wait(futures, timeout=None if milliseconds < 0 else milliseconds / 1000)
+        with self._lock:
+            self._futures.difference_update(_done)
+        return not pending
+
+    def shutdown(self):
+        self._executor.shutdown(wait=True)
 
 
 class DriveSession(QObject):
-    """Owns auth, the Drive client, the transfer manager and the local DB.
+    """Own account resources and drain all jobs before releasing their session."""
 
-    Network/auth work runs in a thread pool; results arrive via Qt signals so the
-    GUI thread never blocks.
-    """
-
-    connected = Signal(object)        # StorageQuota
+    connected = Signal(object)
     connect_failed = Signal(str)
-    transfer_changed = Signal(object)  # Transfer
+    transfer_changed = Signal(object)
+    _transfer_update = Signal(object, int)
     log = Signal(str)
 
     def __init__(self):
@@ -54,12 +85,20 @@ class DriveSession(QObject):
         self.paths = get_paths()
         self.settings: Settings = load_settings()
         self.db = SyncDatabase(self.paths.database_file)
-        self.pool = QThreadPool.globalInstance()
+        self.pool = _WorkerPool()
         self.client = None
         self.transfers = None
         self.about = None
         self.fuse_mount = None
         self._pending: set[_Worker] = set()
+        self._callbacks = {}
+        self._generation = 0
+        self._accepting = True
+        self._closed = False
+        self.account_key = None
+        self._transfer_update.connect(self._deliver_transfer)
+        from electridrive.ui.sync_state import SyncState
+        self.sync_state = SyncState()
 
     # ----------------------------------------------------------------- helpers
     @property
@@ -70,23 +109,55 @@ class DriveSession(QObject):
         return self.paths.credentials_file.exists()
 
     def has_token(self) -> bool:
-        # A cached token (file fallback) means we can likely auto-connect silently.
-        return self.paths.token_fallback_file.exists()
+        from electridrive.google_api.oauth import OAuthError, has_saved_token
+        try:
+            return has_saved_token()
+        except OAuthError as exc:
+            LOGGER.warning("Saved credentials are unavailable: %s", exc)
+            self.log.emit(str(exc))
+            return False
 
     def submit(self, fn, on_result=None, on_error=None, *args, **kwargs):
-        # Keep the worker (and its signals QObject) alive until the queued result is
-        # delivered; otherwise QThreadPool auto-deletes the runnable first and the
-        # cross-thread signal is silently dropped.
-        worker = _Worker(fn, *args, **kwargs)
-        worker.setAutoDelete(False)
+        if not self._accepting or self._closed:
+            raise RuntimeError("Session is closing; new work is refused")
+        generation = self._generation
+        def work():
+            if generation != self._generation:
+                return None
+            return fn(*args, **kwargs)
+        worker = _Worker(work)
+        # Retain signal owners until queued delivery, then disconnect and release them.
         self._pending.add(worker)
-        if on_result:
-            worker.signals.result.connect(on_result)
-        if on_error:
-            worker.signals.error.connect(on_error)
-        worker.signals.result.connect(lambda *_: self._pending.discard(worker))
-        worker.signals.error.connect(lambda *_: self._pending.discard(worker))
-        self.pool.start(worker)
+        self._callbacks[worker.worker_id] = (worker, generation, on_result, on_error)
+        worker.signals.finished.connect(self._finish_worker)
+        try:
+            self.pool.start(worker)
+        except Exception:
+            self._callbacks.pop(worker.worker_id, None)
+            self._pending.discard(worker)
+            worker.signals.finished.disconnect(self._finish_worker)
+            worker.signals.deleteLater()
+            raise
+        return worker
+
+    @Slot(object, object, object)
+    def _finish_worker(self, worker_id, result, error):
+        entry = self._callbacks.pop(worker_id, None)
+        if entry is None:
+            return
+        worker, generation, on_result, on_error = entry
+        self._pending.discard(worker)
+        worker.signals.finished.disconnect(self._finish_worker)
+        worker.signals.deleteLater()
+        if generation != self._generation or self._closed:
+            return
+        callback = on_error if error is not None else on_result
+        if callback:
+            from shiboken6 import isValid
+            owner = getattr(callback, "__self__", None)
+            if isinstance(owner, QObject) and not isValid(owner):
+                return
+            callback(error if error is not None else result)
 
     def save(self):
         qa.validate_settings(self.settings)
@@ -99,84 +170,134 @@ class DriveSession(QObject):
 
     def _do_connect(self):
         from electridrive.google_api.client import GoogleDriveClient
-
-        client = qa.restrict_client(GoogleDriveClient())  # triggers OAuth (or refresh) as needed
+        from electridrive.sync.safety import account_key_for
+        client = qa.restrict_client(GoogleDriveClient())
         about = client.get_about()
+        account_key_for(client)  # prime immutable identity in this background job
         return client, about
+
+    @Slot(object, int)
+    def _deliver_transfer(self, transfer, generation):
+        if generation == self._generation and not self._closed:
+            self.transfer_changed.emit(transfer)
 
     def _on_connected(self, payload):
         from electridrive.transfers import TransferManager
-
+        from electridrive.sync.safety import account_key_for
         client, about = payload
-        self.client = client
-        self.about = about
-        self.transfers = TransferManager(
-            client,
-            on_update=lambda t: self.transfer_changed.emit(t),
-            on_log=lambda m: self.log.emit(m),
-        )
+        try:
+            qa.check_startup()
+            client = qa.restrict_client(client)
+            identity = account_key_for(client)
+            if self.transfers is not None and identity != self.account_key:
+                raise RuntimeError("Drive account changed; sign out before switching account")
+            manager = self.transfers
+            if manager is None:
+                generation = self._generation
+                manager = TransferManager(client,
+                    on_update=lambda t: self._transfer_update.emit(t, generation),
+                    on_log=self.log.emit,
+                    journal_path=(None if qa.current_policy() or identity.startswith("ephemeral:")
+                                  else self.paths.state_dir / "transfer_queue.sqlite3"),
+                    account_key=identity)
+            else:
+                manager.replace_client(client)
+        except Exception as exc:
+            LOGGER.exception("Could not open account transfer queue")
+            self.connect_failed.emit(str(exc))
+            return False
+        self.account_key = identity
+        self.client, self.about, self.transfers = client, about, manager
         self.log.emit(f"Connected as {about.user_email or 'Drive user'}")
         self.connected.emit(about)
+        return True
 
     def refresh_about(self, on_result=None):
         if not self.client:
             return
         self.submit(self.client.get_about, on_result=on_result)
 
-    def reload_client(self):
-        """Rebuild the client + transfer manager from the saved token (e.g. after the
-        Picker grants access to new files). No browser — the token is already valid."""
-        from electridrive.google_api.client import GoogleDriveClient
-        from electridrive.transfers import TransferManager
+    def reload_client(self, on_done=None, on_error=None):
+        """Refresh grants in the background, preserving the manager and transfer IDs."""
+        expected = self.account_key
+        def work():
+            from electridrive.sync.safety import account_key_for
+            payload = self._do_connect()
+            if expected and account_key_for(payload[0]) != expected:
+                raise RuntimeError("Picker account changed; sign out before switching account")
+            return payload
+        def done(payload):
+            if not self._on_connected(payload):
+                return
+            if on_done:
+                on_done(payload[1])
+        return self.submit(work, done, on_error or self.log.emit)
 
-        old = self.transfers
-        self.client = qa.restrict_client(GoogleDriveClient())
-        self.transfers = TransferManager(
-            self.client,
-            on_update=lambda t: self.transfer_changed.emit(t),
-            on_log=lambda m: self.log.emit(m),
-        )
-        if old:
-            old.shutdown(wait=False)
+    def _drain(self):
+        self._accepting = False
+        self._generation += 1
+        self.sync_state.cancel.set()
+        if self.transfers:
+            self.transfers.cancel_pending()
+        if self.fuse_mount and self.fuse_mount.is_mounted:
+            self.fuse_mount.stop()  # retain references and report failure if still mounted
+        if self.transfers:
+            self.transfers.shutdown(wait=True)
+        self.pool.waitForDone()
+        # Delivery can still be queued; disconnect it and release every retained closure.
+        for worker in tuple(self._pending):
+            worker.signals.finished.disconnect(self._finish_worker)
+            worker.signals.deleteLater()
+        self._pending.clear()
+        self._callbacks.clear()
+        self.sync_state.reset()
+
+    def sign_out(self):
+        from electridrive.google_api.oauth import clear_credentials
+        self._drain()
+        clear_credentials()
+        self.client = self.about = self.transfers = self.fuse_mount = None
+        self.account_key = None
+        self._accepting = True
 
     def set_access_mode(self, mode: str):
         """Switch between 'file' (drive.file) and 'drive' (Pro/full). Clears the saved
         token so the next connect re-consents with the new scope."""
         if qa.current_policy() and mode != "file":
             raise qa.QaSafetyError("QA safety: only per-file access is supported")
-        from electridrive.google_api.oauth import clear_credentials
-
+        self.sign_out()
         self.settings.scope = mode
         self.save()
-        clear_credentials()
-        self.client = None
-        self.about = None
 
     def pick_from_drive(self, on_done=None, on_error=None):
-        """Open the desktop Drive Picker (in a worker thread), then refresh access."""
+        expected = self.account_key
         def work():
             if qa.current_policy():
                 raise qa.QaSafetyError("QA safety: Drive Picker is disabled; use registered QA roots")
-            from electridrive.google_api.picker import pick_from_drive as _pick
-            return _pick()
-
-        def done(result):
-            self.reload_client()
+            from electridrive.google_api.client import GoogleDriveClient
+            from electridrive.google_api.picker import pick_from_drive
+            from electridrive.sync.safety import account_key_for
+            result = pick_from_drive(persist=False)
+            client = qa.restrict_client(GoogleDriveClient(credentials=result.credentials))
+            about = client.get_about()
+            if not expected or account_key_for(client) != expected:
+                raise RuntimeError("Picker account changed; sign out before switching account")
+            return result, client, about
+        def done(payload):
+            from electridrive.google_api.oauth import save_credentials
+            result, client, about = payload
+            if not self._on_connected((client, about)):
+                return
+            save_credentials(result.credentials)
             self.log.emit(f"Added {len(result.file_ids)} item(s) from Drive")
             if on_done:
                 on_done(result)
-
         self.submit(work, done, on_error)
 
     def shutdown(self):
-        try:
-            if self.fuse_mount and self.fuse_mount.is_mounted:
-                self.fuse_mount.stop()
-        except Exception:
-            LOGGER.debug("fuse unmount on shutdown failed", exc_info=True)
-        try:
-            if self.transfers:
-                self.transfers.cancel_all()
-                self.transfers.shutdown(wait=False)
-        finally:
-            self.db.close()
+        if self._closed:
+            return
+        self._drain()
+        self.pool.shutdown()
+        self.db.close()
+        self._closed = True

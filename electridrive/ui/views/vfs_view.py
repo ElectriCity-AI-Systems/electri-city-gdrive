@@ -154,7 +154,10 @@ class VfsView(QWidget):
             return
         mount = self._mount_obj()
         if mount.is_mounted:
-            mount.stop()
+            try:
+                mount.stop()
+            except Exception as exc:
+                QMessageBox.warning(self, "Unmount failed", str(exc))
             self._refresh()
             return
         if not self._session.client:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import weakref
+from shiboken6 import isValid
+from electridrive.ui.sync_state import sync_state_for
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -33,11 +37,7 @@ class SyncView(QWidget):
         super().__init__()
         self._session = session
         self._p = palette
-        self._sync_busy = False
-        self._active_pair_ids: set[int] = set()
-        # Keep pair identity with its report: removal/recreation must not reuse
-        # candidates from an unrelated pair, even if Python reuses an object ID.
-        self._last_reports: dict[int, tuple[SyncPair, SyncReport]] = {}
+        self._state = sync_state_for(session)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -79,9 +79,35 @@ class SyncView(QWidget):
         self.empty = EmptyState("sync", "No sync pairs yet",
                                 "Add a pair to mirror a folder with Drive.", palette)
         root.addWidget(self.empty, 1)
+        self._state.changed.connect(self._reload)
         self._reload()
 
+    @property
+    def _sync_busy(self):
+        return self._state.busy
+
+    @_sync_busy.setter
+    def _sync_busy(self, value):
+        self._state.busy = value
+
+    @property
+    def _active_pair_ids(self):
+        return self._state.active
+
+    @_active_pair_ids.setter
+    def _active_pair_ids(self, value):
+        self._state.active = value
+
+    @property
+    def _last_reports(self):
+        return self._state.reports
+
+    @_last_reports.setter
+    def _last_reports(self, value):
+        self._state.reports = value
+
     def _reload(self):
+        self._sync_all_button.setText("Syncing all…" if self._sync_busy else "Sync all")
         self._sync_all_button.setEnabled(not self._sync_busy and bool(self._session.client))
         while self.list_col.count():
             item = self.list_col.takeAt(0)
@@ -210,12 +236,7 @@ class SyncView(QWidget):
             self._review_remote_path_conflicts(pair, self._blocking_conflicts(report))
 
     def _finish_sync(self):
-        self._sync_busy = False
-        self._active_pair_ids.clear()
-        self._sync_all_button.setText("Sync all")
-        # Cards may have been rebuilt/disabled/removed while the worker ran.
-        # Never touch the QLabel/QPushButton captured from an older card.
-        self._reload()
+        self._state.finish()
 
     def _sync_now(self, pair: SyncPair):
         # Disabled pairs must stay inert even when called programmatically.
@@ -225,29 +246,38 @@ class SyncView(QWidget):
             return
         self._sync_busy = True
         self._active_pair_ids = {id(pair)}
-        self._reload()
+        state = self._state
+        state.cancel = threading.Event()
+        cancel = state.cancel
+        client, db = self._session.client, getattr(self._session, "db", None)
+        session = self._session
+        view_ref = weakref.ref(self)
+        def live_view():
+            view = view_ref()
+            return view if view is not None and isValid(view) else None
+        state.changed.emit()
 
         def work():
             from electridrive.sync.twoway import TwoWaySyncEngine
             qa.validate_pair(pair)
-            return TwoWaySyncEngine(self._session.client, self._session.db, pair).run()
+            return TwoWaySyncEngine(client, db, pair, cancel_event=cancel).run()
 
         def done(report):
-            self._last_reports[id(pair)] = (pair, report)
-            self._finish_sync()
-            if report.failed or report.unexplained_omissions:
-                show_readable_warning(
-                    self, self._p, "Sync incomplete",
-                    self._failure_message(report),
-                )
+            state.reports[id(pair)] = (pair, report)
+            state.finish()
+            view = live_view()
+            if view and (report.failed or report.unexplained_omissions):
+                show_readable_warning(view, view._p, "Sync incomplete", view._failure_message(report))
 
         def fail(msg):
-            self._last_reports[id(pair)] = (pair, SyncReport(failed=1, errors=[msg]))
-            self._finish_sync()
-            show_readable_warning(self, self._p, "Sync failed", msg)
+            state.reports[id(pair)] = (pair, SyncReport(failed=1, errors=[msg]))
+            state.finish()
+            view = live_view()
+            if view:
+                show_readable_warning(view, view._p, "Sync failed", msg)
 
         try:
-            self._session.submit(work, done, fail)
+            session.submit(work, done, fail)
         except Exception as exc:
             fail(str(exc))
 
@@ -259,52 +289,64 @@ class SyncView(QWidget):
         self._sync_busy = True
         self._active_pair_ids = {id(p) for p in self._session.settings.sync_pairs if p.enabled}
         btn.setText("Syncing all…")
-        self._reload()
+        state = self._state
+        state.cancel = threading.Event()
+        cancel = state.cancel
+        client, db = self._session.client, getattr(self._session, "db", None)
+        session = self._session
+        view_ref = weakref.ref(self)
+        def live_view():
+            view = view_ref()
+            return view if view is not None and isValid(view) else None
+        state.changed.emit()
 
+        pairs = tuple(session.settings.sync_pairs)
+        settings = session.settings
         def work():
             from electridrive.sync.runner import run_configured_pairs
 
-            qa.validate_settings(self._session.settings)
-            return run_configured_pairs(
-                self._session.client,
-                self._session.db,
-                self._session.settings.sync_pairs,
-            )
+            qa.validate_settings(settings)
+            return run_configured_pairs(client, db, pairs, cancel_event=cancel)
 
         def done(result):
             for outcome in result.outcomes:
-                self._last_reports[id(outcome.pair)] = (outcome.pair, outcome.report)
-            self._finish_sync()
+                state.reports[id(outcome.pair)] = (outcome.pair, outcome.report)
+            state.finish()
+            view = live_view()
+            if view is None:
+                return
             if result.failed_pairs:
                 failed = [outcome for outcome in result.outcomes
                           if outcome.report.failed or outcome.report.unexplained_omissions]
                 detail = "\n\n".join(
                     f"Drive folder: {outcome.pair.remote_folder}\n"
-                    + self._failure_message(outcome.report)
+                    + view._failure_message(outcome.report)
                     for outcome in failed[:8]
                 )
                 if len(failed) > 8:
                     detail += f"\n… and {len(failed) - 8} more failed pairs."
                 show_readable_warning(
-                    self, self._p, "Some sync pairs failed",
+                    view, view._p, "Some sync pairs failed",
                     f"Completed {result.successful_pairs} of {result.enabled_pairs} "
                     f"enabled pairs.\n\n{detail}",
                 )
             else:
                 show_readable_information(
-                    self, self._p, "Sync complete",
+                    view, view._p, "Sync complete",
                     f"All {result.successful_pairs} enabled sync pairs completed.",
                 )
 
         def fail(msg):
-            for pair in self._session.settings.sync_pairs:
-                if id(pair) in self._active_pair_ids:
-                    self._last_reports[id(pair)] = (pair, SyncReport(failed=1, errors=[msg]))
-            self._finish_sync()
-            show_readable_warning(self, self._p, "Sync all failed", msg)
+            for pair in pairs:
+                if id(pair) in state.active:
+                    state.reports[id(pair)] = (pair, SyncReport(failed=1, errors=[msg]))
+            state.finish()
+            view = live_view()
+            if view:
+                show_readable_warning(view, view._p, "Sync all failed", msg)
 
         try:
-            self._session.submit(work, done, fail)
+            session.submit(work, done, fail)
         except Exception as exc:
             fail(str(exc))
 

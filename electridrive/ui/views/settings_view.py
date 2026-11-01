@@ -220,7 +220,13 @@ class SettingsView(QWidget):
             self._mode_combo.setCurrentIndex(
                 max(0, self._mode_combo.findData(self._session.settings.scope)))
             return
-        self._session.set_access_mode(mode)
+        try:
+            self._session.set_access_mode(mode)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not change account access", str(exc))
+            self._mode_combo.setCurrentIndex(
+                max(0, self._mode_combo.findData(self._session.settings.scope)))
+            return
         self.reconnect_requested.emit()
 
     def _paths_card(self) -> Card:
