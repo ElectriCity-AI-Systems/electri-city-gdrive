@@ -44,6 +44,7 @@ def test_real_local_smtp_rejects_untrusted_certificate(monkeypatch, tmp_path, tr
                     assert stream.readline().strip() == b'STARTTLS'
                     conn.sendall(b'220 start TLS\r\n')
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
                 context.load_cert_chain(cert_path, key_path)
                 try:
                     with context.wrap_socket(conn, server_side=True) as secured:
