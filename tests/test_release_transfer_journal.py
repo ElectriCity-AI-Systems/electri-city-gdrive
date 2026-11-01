@@ -225,3 +225,122 @@ def test_saved_upload_retry_refuses_a_source_replaced_with_symlink(tmp_path):
         assert not drive.uploads
     finally:
         second.shutdown()
+
+
+def test_returned_upload_id_save_failure_never_reports_done_or_retries_cloud(tmp_path, monkeypatch):
+    import sqlite3
+    import pytest
+    source = tmp_path / 'source'
+    source.write_bytes(b'content')
+    drive, events = FakeDrive(), []
+    manager = TransferManager(drive, journal_path=tmp_path / 'queue.sqlite3',
+                              account_key='a', max_workers=1,
+                              on_update=lambda task: events.append((task.state.value, task.file_id, task.error)))
+    save = manager._journal.save
+    def fail_known_id(transfer_id, payload):
+        if payload['file_id']:
+            raise sqlite3.OperationalError('disk full after upload returned')
+        save(transfer_id, payload)
+    monkeypatch.setattr(manager._journal, 'save', fail_known_id)
+    try:
+        tid = manager.enqueue_upload(source)[0]
+        assert manager.wait_idle(2)
+        manager._queue.join()  # callback delivery must have completed before inspecting events
+        task = manager.get(tid)
+        assert task.state.value == 'failed'
+        assert task.file_id == 'file-1' and task.recovered
+        assert 'journal' in task.error.lower() and 'already' in task.error.lower()
+        assert not any(state == 'done' for state, _, _ in events)
+        assert any(state == 'failed' and rid == 'file-1' and error for state, rid, error in events)
+        saved = dict(manager._journal.load())[tid]
+        assert saved['state'] == 'running' and saved['file_id'] == ''
+        monkeypatch.setattr(manager._journal, 'save', save)
+        with pytest.raises(RuntimeError, match='file-1'):
+            manager.retry(tid)
+        assert len(drive.uploads) == 1
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_save_failure_preserves_known_upload_id_and_publishes_failed(tmp_path, monkeypatch):
+    import sqlite3
+    import pytest
+    source = tmp_path / 'source'
+    source.write_bytes(b'content')
+    drive, events = FakeDrive(), []
+    path = tmp_path / 'queue.sqlite3'
+    manager = TransferManager(drive, journal_path=path, account_key='a', max_workers=1,
+                              on_update=lambda task: events.append((task.state.value, task.error)))
+    save = manager._journal.save
+    def fail_done(transfer_id, payload):
+        if payload['state'] == 'done':
+            raise sqlite3.OperationalError('cannot save terminal state')
+        save(transfer_id, payload)
+    monkeypatch.setattr(manager._journal, 'save', fail_done)
+    try:
+        tid = manager.enqueue_upload(source)[0]
+        assert manager.wait_idle(2)
+        manager._queue.join()
+        task = manager.get(tid)
+        assert task.state.value == 'failed' and task.file_id == 'file-1'
+        assert task.recovered and 'journal' in task.error.lower()
+        assert not any(state == 'done' for state, _ in events)
+        saved = dict(manager._journal.load())[tid]
+        assert saved['state'] == 'failed' and saved['file_id'] == 'file-1'
+        assert saved['recovered'] and 'journal' in saved['error'].lower()
+        with pytest.raises(RuntimeError, match='file-1'):
+            manager.retry(tid)
+    finally:
+        manager.shutdown()
+    reopened = TransferManager(drive, journal_path=path, account_key='a')
+    try:
+        with pytest.raises(RuntimeError, match='file-1'):
+            reopened.retry(tid)
+        assert len(drive.uploads) == 1
+    finally:
+        reopened.shutdown()
+
+
+def test_download_terminal_save_failure_reports_published_destination(tmp_path, monkeypatch):
+    import sqlite3
+    drive, states = FakeDrive(), []
+    fid = drive.add_file('file', b'payload')
+    manager = TransferManager(drive, journal_path=tmp_path / 'queue.sqlite3',
+                              account_key='a', max_workers=1,
+                              on_update=lambda task: states.append(task.state.value))
+    save = manager._journal.save
+    def fail_done(transfer_id, payload):
+        if payload['state'] == 'done':
+            raise sqlite3.OperationalError('cannot save terminal state')
+        save(transfer_id, payload)
+    monkeypatch.setattr(manager._journal, 'save', fail_done)
+    try:
+        tid = manager.enqueue_download(drive.get_metadata(fid), tmp_path / 'dest')[0]
+        assert manager.wait_idle(2)
+        manager._queue.join()
+        task = manager.get(tid)
+        assert task.state.value == 'failed'
+        assert task.dest_path.read_bytes() == b'payload'
+        assert str(task.dest_path) in task.error and 'journal' in task.error.lower()
+        assert 'done' not in states
+    finally:
+        manager.shutdown()
+
+
+def test_done_callback_observes_already_committed_terminal_state(tmp_path):
+    source = tmp_path / 'source'
+    source.write_bytes(b'content')
+    persisted = []
+    def changed(task):
+        if task.state.value == 'done':
+            persisted.append(dict(manager._journal.load())[task.id])
+    manager = TransferManager(FakeDrive(), journal_path=tmp_path / 'queue.sqlite3',
+                              account_key='a', max_workers=1, on_update=changed)
+    try:
+        manager.enqueue_upload(source)
+        assert manager.wait_idle(2)
+        manager._queue.join()
+        assert len(persisted) == 1
+        assert persisted[0]['state'] == 'done' and persisted[0]['file_id'] == 'file-1'
+    finally:
+        manager.shutdown()

@@ -418,7 +418,8 @@ class FuseMount:
         result = subprocess.run([tool, "-u", self.mountpoint], check=False,
                                 capture_output=True, text=True, timeout=10)
         if result.returncode:
-            raise RuntimeError(f"Unmount failed: {getattr(result, "stderr", "") or result.returncode}")
+            detail = getattr(result, "stderr", "") or result.returncode
+            raise RuntimeError(f"Unmount failed: {detail}")
         if self._thread:
             self._thread.join(timeout=5.0)
             if self._thread.is_alive():

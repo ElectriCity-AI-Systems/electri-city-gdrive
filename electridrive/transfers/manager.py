@@ -308,6 +308,11 @@ class TransferManager:
             self._check_open()
             if not old or old.state != TransferState.FAILED:
                 return None
+            if old.kind == TransferKind.UPLOAD and old.file_id:
+                raise RuntimeError(
+                    f"Upload already returned Drive ID {old.file_id}; verify that existing "
+                    "file instead of retrying and creating a duplicate."
+                )
             self._validate_transfer(old)
             new = self._new_transfer(
                 old.kind, old.name, total=old.total, local_path=old.local_path,
@@ -434,7 +439,13 @@ class TransferManager:
                 # The descriptor remains open while the adapter consumes its bytes.
                 with opened_source(anchor, relative) as pinned:
                     t.file_id = client.upload_file(pinned, t.parent_id, t.name, progress)
-                self._emit(t)  # retain a returned remote ID even before terminal publication
+                if not self._emit(t):
+                    t.recovered = True
+                    raise RuntimeError(
+                        f"Transfer journal persistence failed after upload returned; the upload "
+                        f"already exists on Drive as {t.file_id}. Its outcome may not be saved; "
+                        "verify that file before taking further action."
+                    )
             elif t.kind == TransferKind.DOWNLOAD:
                 assert t.dest_path is not None
                 self._download_atomic(client, t, progress)
@@ -443,8 +454,10 @@ class TransferManager:
                 self._download_atomic(client, t, progress)
             t.bytes_done = t.total or t.bytes_done
             t.finished_at = time.time()
-            self._finish(t, TransferState.DONE)
-            self._log(f"{t.kind.value} done: {t.name}")
+            if self._finish(t, TransferState.DONE):
+                self._log(f"{t.kind.value} done: {t.name}")
+            else:
+                self._log(f"{t.kind.value} FAILED: {t.name}: {t.error}")
         except TransferCanceled:
             t.finished_at = time.time()
             self._finish(t, TransferState.CANCELED)
@@ -495,32 +508,67 @@ class TransferManager:
                 except FileNotFoundError:
                     pass
 
-    def _finish(self, t: Transfer, state: TransferState) -> None:
-        """Set a terminal state exactly once and release waiters."""
+    def _save(self, t: Transfer, state: TransferState | None = None) -> None:
+        if self._journal is not None:
+            payload = self._payload(t)
+            if state is not None:
+                payload["state"] = state.value
+            self._journal.save(t.id, payload)
+
+    def _finish(self, t: Transfer, state: TransferState) -> bool:
+        """Commit before publishing a terminal state, releasing waiters exactly once."""
         with self._cond:
             if t.is_terminal:
-                return
-            t.state = state
+                return t.state == state
+            durable = True
+            try:
+                # Do not expose DONE even through the shared Transfer object before
+                # the required commit: queued Qt callbacks can still hold that object.
+                self._save(t, state)
+            except Exception as exc:
+                durable = False
+                LOGGER.exception("Could not save terminal transfer %s", t.id)
+                detail = f"Transfer journal persistence failed: {exc}. Outcome may not be saved."
+                if t.kind == TransferKind.UPLOAD and t.file_id:
+                    t.recovered = True
+                    detail += f" Upload already exists on Drive as {t.file_id}; do not upload it again."
+                elif state == TransferState.DONE:
+                    t.recovered = True
+                    detail += f" File was published at {t.dest_path}; verify that destination before retrying."
+                t.error = f"{t.error}; {detail}" if t.error else detail
+                state = TransferState.FAILED
+                t.state = state
+                try:
+                    self._save(t)
+                except Exception:
+                    LOGGER.exception("Could not save transfer persistence failure %s", t.id)
+                self._log(t.error)
+            else:
+                t.state = state
             self._outstanding -= 1
             self._cond.notify_all()
-        self._emit(t)
+        # Failed persistence is still surfaced to consumers explicitly as FAILED;
+        # it never generates a successful terminal event.
+        self._notify(t)
+        return durable
 
     def _emit(self, t: Transfer) -> bool:
-        durable = True
         try:
             with self._lock:
-                if self._journal is not None:
-                    self._journal.save(t.id, self._payload(t))
+                self._save(t)
         except Exception as exc:
-            durable = False
             LOGGER.exception("Could not save transfer %s", t.id)
             self._log(f"Could not save transfer {t.id}: {exc}")
+            return False
+        self._notify(t)
+        return True
+
+    def _notify(self, t: Transfer) -> None:
         if self._on_update:
             try:
                 self._on_update(t)
             except Exception:  # a broken UI callback must not kill a worker
                 LOGGER.debug("on_update callback raised", exc_info=True)
-        return durable
 
     def _log(self, message: str) -> None:
         LOGGER.info(message)
