@@ -476,7 +476,11 @@ class TransferManager:
         relative = dest.relative_to(root).as_posix()
         with anchored_parent(root, relative, create=True) as (parent_fd, name):
             temporary = ".electridrive-" + uuid4().hex
-            partial = dest.with_name(temporary)
+            # The adapter may create and replace its own temporary file. Keep
+            # all of those writes anchored even if a selected ancestor moves.
+            # QA instead needs its checked pathname and policy-aware writer.
+            partial = (dest.with_name(temporary) if qa.current_policy()
+                       else Path(f"/proc/self/fd/{parent_fd}") / temporary)
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=parent_fd)
             os.close(fd)

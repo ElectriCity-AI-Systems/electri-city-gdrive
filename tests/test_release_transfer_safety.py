@@ -7,6 +7,51 @@ from electridrive.transfers import TransferManager
 from fakes import FakeDrive
 
 
+@pytest.mark.parametrize('export', [False, True], ids=['binary', 'export'])
+def test_adapter_atomic_write_stays_in_held_parent_after_ancestor_swap(tmp_path, export):
+    from electridrive.google_api.client import _atomic_download_file
+
+    selected = tmp_path / 'selected'
+    destination = selected / 'nested'
+    destination.mkdir(parents=True)
+    held = tmp_path / 'held'
+    outside = tmp_path / 'outside'
+    (outside / 'nested').mkdir(parents=True)
+    drive = FakeDrive()
+    mime = 'application/vnd.google-apps.document' if export else 'application/octet-stream'
+    file_id = drive.add_file('data', b'private-download', mime=mime)
+    outside_entries = []
+
+    def raced_download(_file_id, partial, *_args, **_kwargs):
+        # Swap an ancestor before the real adapter creates its own temporary
+        # file, writes bytes, and replaces the manager's reserved partial.
+        selected.rename(held)
+        selected.symlink_to(outside, target_is_directory=True)
+        with _atomic_download_file(partial) as stream:
+            outside_entries.append(list((outside / 'nested').iterdir()))
+            stream.write(b'private-download')
+            stream.flush()
+            outside_entries.append(list((outside / 'nested').iterdir()))
+        outside_entries.append(list((outside / 'nested').iterdir()))
+        return partial
+
+    if export:
+        drive.export_file = raced_download
+    else:
+        drive.download_file = raced_download
+    manager = TransferManager(drive, max_workers=1)
+    try:
+        transfer_id = manager.enqueue_download(drive.get_metadata(file_id), destination)[0]
+        assert manager.wait_idle(3)
+        assert manager.get(transfer_id).state.value == 'failed'
+        assert outside_entries == [[], [], []]
+        assert list(outside.iterdir()) == [outside / 'nested']
+        assert not list((outside / 'nested').iterdir())
+        assert not list((held / 'nested').iterdir())
+    finally:
+        manager.shutdown()
+
+
 def test_separate_download_requests_never_overwrite_each_other(tmp_path):
     drive = FakeDrive()
     a, b = drive.add_file('same', b'first'), drive.add_file('same', b'second')

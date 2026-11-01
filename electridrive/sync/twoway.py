@@ -1054,6 +1054,11 @@ class TwoWaySyncEngine:
         local = {rel: entry for rel, entry in local.items() if not self._excluded(rel)}
         remote = {rel: entry for rel, entry in remote.items() if not self._excluded(rel)}
         last = {rel: entry for rel, entry in last.items() if not self._excluded(rel)}
+        # Remote-only exclusions (for example shortcuts) can suppress a local
+        # directory and all descendants discovered before the remote scan.
+        # Use the same included inventory for convergence and completeness.
+        self._local_dirs = {rel for rel in self._local_dirs if not self._excluded(rel)}
+        self._remote_dirs = {rel for rel in self._remote_dirs if not self._excluded(rel)}
         report.blocked_before_transfers = False
         self._sync_directories(report)
         actions = reconcile(local, remote, last,
@@ -1076,8 +1081,8 @@ class TwoWaySyncEngine:
         self._check_cancel()
         self._check_completeness(local, remote, report)
         if report.unexplained_omissions == 0:
-            synchronized_dirs = self._synchronized_directory_map()
             try:
+                synchronized_dirs = self._synchronized_directory_map()
                 self.db.replace_sync_folders(self.pair_id, synchronized_dirs)
             except Exception as exc:
                 self._report_failure(report, f"persist folder state: {exc}")
@@ -1142,11 +1147,19 @@ class TwoWaySyncEngine:
             paths = self._remote_dirs
         else:
             paths = self._local_dirs | self._remote_dirs
-        return {
+        # Exclusion suspends a relationship; it does not erase its history or
+        # authorize an excluded object to be replaced by a newly created one.
+        folders = {
+            item.local_rel: item.remote_id
+            for item in self.db.list_sync_folders(self.pair_id)
+            if self._excluded(item.local_rel)
+        }
+        folders.update({
             rel: self._dir_ids[rel]
             for rel in paths
             if rel in self._local_dirs and rel in self._remote_dirs and rel in self._dir_ids
-        }
+        })
+        return folders
 
     def _check_completeness(
         self,

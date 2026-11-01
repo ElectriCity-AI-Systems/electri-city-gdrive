@@ -12,6 +12,63 @@ from electridrive.sync.downloader import plan_download
 from fakes import FakeDrive
 
 
+@pytest.mark.parametrize('direction', ['two_way', 'up_only'])
+@pytest.mark.parametrize('with_history', [False, True], ids=['new', 'history'])
+def test_remote_shortcut_suppresses_local_directory_subtree(tmp_path, direction, with_history):
+    from copy import deepcopy
+    from electridrive.google_api.client import DRIVE_SHORTCUT_MIME
+
+    root = tmp_path / 'sync'
+    data = root / 'shortcut/nested/deep/data'
+    data.parent.mkdir(parents=True)
+    data.write_bytes(b'local-data')
+    drive = FakeDrive()
+    remote_root = drive.ensure_folder_path('Backup')
+    pair = SyncPair(str(root), 'Backup', direction=direction, include_all_files=False)
+    db = SyncDatabase(tmp_path / 'state.db')
+    try:
+        engine = TwoWaySyncEngine(drive, db, pair)
+        if with_history:
+            assert engine.run().uploaded == 1
+            drive.trash(drive.find_folder('shortcut', remote_root))
+            data.write_bytes(b'local-edit')
+        else:
+            engine._bind_roots()
+        items_before = db.list_sync_items(engine.pair_id)
+        folders_before = {item.local_rel: item.remote_id
+                          for item in db.list_sync_folders(engine.pair_id)}
+        shortcut = drive.add_file('shortcut', b'', remote_root, mime=DRIVE_SHORTCUT_MIME)
+        nodes_before = deepcopy(drive.nodes)
+        # Included siblings still converge, so suppression cannot simply abort
+        # the inventory or skip the entire run.
+        (root / 'included').mkdir()
+        (root / 'included/keep').write_bytes(b'included')
+        for iteration in range(2):
+            report = engine.run()
+            assert report.failed == report.unexplained_omissions == 0
+            assert report.excluded_remote == 1
+            assert report.folders_created_local == report.downloaded == 0
+            assert report.trashed_local == report.trashed_remote == 0
+            assert report.uploaded == report.folders_created_remote == (1 if iteration == 0 else 0)
+            assert {key: drive.nodes[key] for key in nodes_before} == nodes_before
+            assert drive.nodes[shortcut]['mime'] == DRIVE_SHORTCUT_MIME
+            assert {node['name'] for key, node in drive.nodes.items()
+                    if key not in nodes_before} == {'included', 'keep'}
+            assert {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()} == {
+                'included/keep', 'shortcut/nested/deep/data'
+            }
+            assert data.read_bytes() == (b'local-edit' if with_history else b'local-data')
+            assert [item for item in db.list_sync_items(engine.pair_id)
+                    if item.local_rel.startswith('shortcut/')] == items_before
+            folders = {item.local_rel: item.remote_id
+                       for item in db.list_sync_folders(engine.pair_id)}
+            assert {rel: remote_id for rel, remote_id in folders.items()
+                    if rel == 'shortcut' or rel.startswith('shortcut/')} == folders_before
+            assert folders['included'] == drive.find_folder('included', remote_root)
+    finally:
+        db.close()
+
+
 def setup_pair(tmp_path):
     root = tmp_path / 'sync'
     root.mkdir()
