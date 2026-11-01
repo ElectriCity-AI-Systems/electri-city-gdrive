@@ -69,7 +69,7 @@ APPIMAGE=dist/ElectriDrive-x86_64.AppImage
 if [ "$BUILD_CHANNEL" = "CI-QA" ]; then
   APPIMAGE=dist/ElectriDrive-CI-QA-x86_64.AppImage
 fi
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" "$APPDIR" "$APPIMAGE"
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --runtime-file "$RUNTIME" --mksquashfs-opt=-processors --mksquashfs-opt=2 "$APPDIR" "$APPIMAGE"
 
 # ---- .deb ----
 ROOT="dist/deb/electridrive_${VERSION}_amd64"
