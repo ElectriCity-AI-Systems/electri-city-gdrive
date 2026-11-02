@@ -50,9 +50,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: electridrive-2.2.0-candidate-${{ github.sha }}
+          name: electridrive-2.2.1-candidate-${{ github.sha }}
           path: |
-            dist/electridrive_2.2.0_amd64.deb
+            dist/electridrive_2.2.1_amd64.deb
             dist/ElectriDrive-x86_64.AppImage
             dist/SHA256SUMS.txt
             dist/candidate-manifest.json

@@ -157,7 +157,7 @@ def main(argv=None):
     parser.add_argument('--source-record',type=Path)
     parser.add_argument('--manifest',type=Path,default=ROOT/'dist/candidate-manifest.json')
     parser.add_argument('--ci-run',type=int)
-    parser.add_argument('--notes',type=Path,default=ROOT/'packaging/release-2.2.0.md')
+    parser.add_argument('--notes',type=Path,default=ROOT/'packaging/release-2.2.1.md')
     args=parser.parse_args(argv)
     if args.snapshot:
         args.snapshot.write_text(json.dumps(source_snapshot(),indent=2)+'\n');return
