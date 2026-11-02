@@ -481,11 +481,19 @@ class SyncView(QWidget):
                     "duplicate before enabling any writes.",
                 )
                 return
+            full_backup_notice = (
+                "\nFull backup is on: every file is included regardless of name, "
+                "including hidden files, .env, private keys and other credentials. "
+                "ElectriDrive does not encrypt uploads — anyone with access to the "
+                "destination Drive folder can read them.\n"
+                if pair.include_all_files else ""
+            )
             if QMessageBox.question(
                 self, "Enable sync pair?",
                 f"Local: {pair.local_path}\n"
                 f"Drive: {pair.remote_folder}\n"
-                f"Direction: {pair.direction}\n\n"
+                f"Direction: {pair.direction}\n"
+                f"{full_backup_notice}\n"
                 "Enable this pair for future Sync now / Sync all actions? "
                 "No transfer starts immediately.",
             ) != QMessageBox.Yes:

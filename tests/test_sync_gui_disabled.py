@@ -138,6 +138,68 @@ def test_gui_new_pair_starts_disabled_and_requires_explicit_enable(
         _dispose(view, qapp)
 
 
+def test_enable_confirmation_warns_about_sensitive_files_in_full_backup_mode(
+    qapp, tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    pair = SyncPair(
+        local_path=str(tmp_path / "Backup"),
+        remote_folder="ElectriDrive/Backup",
+        direction="up_only",
+        enabled=False,
+        include_all_files=True,
+    )
+    session = FakeSession([pair])
+    session.save = lambda: None
+    view = SyncView(session, get_palette("electric_dark"))
+    seen = {}
+
+    def fake_question(self_, title, text, *a, **k):
+        seen["text"] = text
+        return QMessageBox.Yes
+
+    try:
+        monkeypatch.setattr(QMessageBox, "question", fake_question)
+        view._toggle_pair(0)
+        assert pair.enabled is True
+        assert ".env" in seen["text"]
+        assert "private keys" in seen["text"]
+        assert "does not encrypt" in seen["text"]
+    finally:
+        _dispose(view, qapp)
+
+
+def test_enable_confirmation_omits_sensitive_warning_when_filters_apply(
+    qapp, tmp_path, monkeypatch,
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    pair = SyncPair(
+        local_path=str(tmp_path / "Filtered"),
+        remote_folder="ElectriDrive/Filtered",
+        direction="up_only",
+        enabled=False,
+        include_all_files=False,
+    )
+    session = FakeSession([pair])
+    session.save = lambda: None
+    view = SyncView(session, get_palette("electric_dark"))
+    seen = {}
+
+    def fake_question(self_, title, text, *a, **k):
+        seen["text"] = text
+        return QMessageBox.Yes
+
+    try:
+        monkeypatch.setattr(QMessageBox, "question", fake_question)
+        view._toggle_pair(0)
+        assert pair.enabled is True
+        assert ".env" not in seen["text"]
+    finally:
+        _dispose(view, qapp)
+
+
 def test_gui_rejects_duplicate_local_scope_even_with_disabled_pair(
     qapp, tmp_path, monkeypatch,
 ):
