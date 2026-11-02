@@ -194,20 +194,52 @@ class UploadOnlySyncEngine:
 
                 previous = self.database.get_file(str(file_path), scope=self._file_scope)
                 finder = getattr(self.drive_client, "find_file", None)
-                remote_id = finder(file_path.name, parent_id) if callable(finder) else None
+                found_id = finder(file_path.name, parent_id) if callable(finder) else None
+
+                # A name match is not ownership. Only this pair's own previously
+                # recorded remote_id may be trusted as an update target; a same-named
+                # file *another* sync pair already claimed must never be silently
+                # adopted and overwritten. Genuinely untracked ("wild") pre-existing
+                # content may still be adopted on this pair's first sync.
+                if previous is None:
+                    remote_id = None
+                    if found_id is not None:
+                        if self.database.remote_id_owned_elsewhere(found_id, scope=self._file_scope):
+                            raise RuntimeError(
+                                f"an existing Drive file named {file_path.name!r} in this folder "
+                                "is already tracked by a different sync pair; refusing to "
+                                "overwrite it without confirmation (rename/move it, or resolve "
+                                "manually)"
+                            )
+                        remote_id = found_id
+                else:
+                    remote_id = previous.remote_id
+                    if callable(finder) and found_id is not None and found_id != remote_id:
+                        verify = getattr(self.drive_client, "get_metadata", None)
+                        alive = False
+                        if callable(verify):
+                            try:
+                                alive = not verify(remote_id).trashed
+                            except Exception:
+                                alive = False
+                        if not alive:
+                            raise RuntimeError(
+                                f"stale Drive ID for {relative}: the previously tracked file "
+                                f"{remote_id!r} is gone and a different, unrecognized file now "
+                                "uses this name; refusing to overwrite it without confirmation"
+                            )
+                        # Keep targeting our own tracked file; ignore the unrelated name match.
+                        found_id = remote_id
 
                 if (
                     previous is not None
                     and not self.should_upload(file_path, digest)
-                    and (not callable(finder) or remote_id == previous.remote_id)
+                    and (not callable(finder) or found_id == remote_id)
                 ):
                     result.skipped += 1
                     synchronized_files.add(relative.as_posix())
                     self._log(f"Skipped unchanged: {relative}")
                     continue
-
-                if remote_id is None and previous is not None and not callable(finder):
-                    remote_id = previous.remote_id
 
                 with opened_source(local_root, relative.as_posix()) as source:
                     stat = source.stat()

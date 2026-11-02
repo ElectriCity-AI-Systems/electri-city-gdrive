@@ -393,6 +393,26 @@ class SyncDatabase:
             )
             self._commit()
 
+    def remote_id_owned_elsewhere(self, remote_id: str, *, scope: str = "", pair_id: str = "") -> bool:
+        """True if some *other* sync pair/scope already tracks this exact remote_id.
+
+        Lets a brand-new pair adopt genuinely untracked ("wild") pre-existing
+        Drive content on its first sync (matching prior behavior), while still
+        refusing to adopt a file a *different* pair has already claimed.
+        """
+        with self._access():
+            row = self._conn.execute(
+                "SELECT 1 FROM scoped_files WHERE remote_id=? AND scope<>? LIMIT 1",
+                (remote_id, scope),
+            ).fetchone()
+            if row is not None:
+                return True
+            row = self._conn.execute(
+                "SELECT 1 FROM sync_items WHERE remote_id=? AND pair_id<>? LIMIT 1",
+                (remote_id, pair_id),
+            ).fetchone()
+            return row is not None
+
     def get_folder_id(self, local_rel_path: str) -> str | None:
         with self._access():
             row = self._conn.execute(

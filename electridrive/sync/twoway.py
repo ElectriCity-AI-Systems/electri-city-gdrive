@@ -1252,6 +1252,7 @@ class TwoWaySyncEngine:
             if existing is not None:
                 # This may be a locally disambiguated collision path.  Update
                 # media only so the original Drive name and parent stay intact.
+                existing = self._confirm_upload_target(rel, existing)
                 self._upload(rel, "", existing)
                 fid = existing.file_id
             else:
@@ -1259,9 +1260,12 @@ class TwoWaySyncEngine:
                 parent_dir = "" if parent_dir == "." else parent_dir
                 parent_id = self._ensure_remote_dir(parent_dir)
                 finder = getattr(self.client, "find_file", None)
-                fid = finder(Path(rel).name, parent_id) if callable(finder) else None
-                if fid:
-                    self._upload(rel, parent_id, RemoteEntry(rel, fid, "", "", 0))
+                found_id = finder(Path(rel).name, parent_id) if callable(finder) else None
+                confirmed = self._confirm_upload_target(
+                    rel, RemoteEntry(rel, found_id, "", "", 0) if found_id else None)
+                if confirmed is not None:
+                    self._upload(rel, parent_id, confirmed)
+                    fid = confirmed.file_id
                 else:
                     fid = self._upload(rel, parent_id, None)
             meta = self.client.get_metadata(fid)
@@ -1426,6 +1430,47 @@ class TwoWaySyncEngine:
                     shutil.copyfileobj(input_file, output)
                     output.flush()
                     os.fsync(output.fileno())
+
+    def _confirm_upload_target(self, rel: str, candidate: RemoteEntry | None) -> RemoteEntry | None:
+        """A name/path match at the upload target is not ownership.
+
+        Only a remote_id this pair has itself previously recorded for ``rel``
+        (via the sync-items history or an owner-reviewed duplicate decision)
+        may be trusted as something safe to overwrite. A same-named Drive
+        object this pair never created, or no longer owns, must never be
+        silently adopted as an update target.
+        """
+        if candidate is None:
+            return None
+        owned_id = self._canonical_ids.get(rel)
+        if owned_id is None:
+            # Genuinely untracked ("wild") pre-existing content may still be
+            # adopted on this pair's first sync; a file *another* pair already
+            # claimed must never be silently adopted and overwritten.
+            if self.db.remote_id_owned_elsewhere(candidate.file_id, pair_id=self.pair_id):
+                raise RuntimeError(
+                    f"an existing Drive file at {rel!r} is already tracked by a "
+                    "different sync pair; refusing to overwrite it without "
+                    "confirmation (rename/move it, or resolve the conflict manually)"
+                )
+            return candidate
+        if candidate.file_id == owned_id:
+            return candidate
+        verify = getattr(self.client, "get_metadata", None)
+        alive = False
+        if callable(verify):
+            try:
+                alive = not verify(owned_id).trashed
+            except Exception:
+                alive = False
+        if not alive:
+            raise RuntimeError(
+                f"stale Drive ID for {rel}: the previously tracked file {owned_id!r} is "
+                "gone and a different, unrecognized file now uses this name; refusing "
+                "to overwrite it without confirmation"
+            )
+        # Keep targeting our own tracked file; ignore the unrelated name match.
+        return RemoteEntry(rel, owned_id, "", "", 0)
 
     def _upload(self, rel: str, parent_id: str, existing: RemoteEntry | None) -> str:
         self._check_cancel()
