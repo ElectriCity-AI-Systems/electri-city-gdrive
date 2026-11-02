@@ -1,13 +1,17 @@
 """Regression tests for pair-scoped Drive-ID ownership.
 
-A name/path match at the upload target is not ownership: only a remote_id a
-sync pair has itself previously recorded may be trusted as something safe to
-overwrite. These tests cover the gap found during the 2.2.0 release
-acceptance pass (an unrelated pair's file could be silently overwritten by a
-different pair uploading a same-named file) for both engines that perform
-upload-style writes: UploadOnlySyncEngine (the `sync-up` CLI command) and
-TwoWaySyncEngine in `up_only` direction (the `sync --direction up_only` CLI
-command and the GUI's upload-only pairs).
+A name/path match at the upload target is not ownership, and a missing
+database mapping does not prove a Drive file belongs to the current sync
+job. Only a remote_id a sync pair has itself previously recorded, or one
+the caller explicitly confirms after reviewing its identity
+(`confirmed_remote_ids` / `SyncPair.canonical_remote_ids` -- the same
+mechanism the duplicate-review dialog already writes), may be trusted as
+something safe to overwrite. These tests cover the gap found during the
+2.2.0 release acceptance pass (an unrelated pair's file, or any untracked
+pre-existing file, could be silently overwritten) for both engines that
+perform upload-style writes: UploadOnlySyncEngine (the `sync-up` CLI
+command) and TwoWaySyncEngine in `up_only` direction (the `sync
+--direction up_only` CLI command and the GUI's upload-only pairs).
 """
 from __future__ import annotations
 
@@ -29,9 +33,10 @@ def _up_only_pair(local_root: Path, remote_folder: str) -> SyncPair:
 
 # --------------------------------------------------------------- engine.py (sync-up)
 
-def test_engine_first_sync_adopts_untracked_existing_file(tmp_path: Path) -> None:
-    """Regression safety net: a brand-new pair may still adopt genuinely
-    untracked ("wild") pre-existing Drive content on its first sync."""
+def test_engine_first_sync_refuses_unconfirmed_untracked_existing_file(tmp_path: Path) -> None:
+    """A missing database mapping does not prove a Drive file belongs to this
+    job: an untracked pre-existing file is never silently adopted, even on a
+    pair's first sync and even though no *other* pair claims it either."""
     fake = FakeDrive()
     root = tmp_path / "local"
     root.mkdir()
@@ -46,9 +51,58 @@ def test_engine_first_sync_adopts_untracked_existing_file(tmp_path: Path) -> Non
     finally:
         db.close()
 
+    assert result.failed >= 1
+    assert any("not confirmed as belonging to this sync pair" in e for e in result.errors)
+    assert fake.nodes[wild_id]["content"] == b"pre-existing, never tracked by electridrive"
+
+
+def test_engine_first_sync_adopts_untracked_file_with_explicit_confirmation(tmp_path: Path) -> None:
+    """The user may consciously adopt an existing file after reviewing its
+    identity, by passing its reviewed remote_id via confirmed_remote_ids."""
+    fake = FakeDrive()
+    root = tmp_path / "local"
+    root.mkdir()
+    (root / "shared.txt").write_bytes(b"local-content")
+    remote_root = fake.ensure_folder_path("ElectriDrive/Wild")
+    wild_id = fake.add_file("shared.txt", b"pre-existing, never tracked by electridrive", parent=remote_root)
+
+    db = SyncDatabase(tmp_path / "db.sqlite3")
+    try:
+        engine = UploadOnlySyncEngine(
+            drive_client=fake, database=db, rules=SyncRules(),
+            confirmed_remote_ids={"shared.txt": wild_id},
+        )
+        result = engine.sync_up(root, "ElectriDrive/Wild")
+    finally:
+        db.close()
+
     assert result.failed == 0
     assert result.uploaded == 1
     assert fake.nodes[wild_id]["content"] == b"local-content"
+
+
+def test_engine_confirmation_for_a_different_path_does_not_authorize_this_one(tmp_path: Path) -> None:
+    """A confirmation only covers the exact relative path it names."""
+    fake = FakeDrive()
+    root = tmp_path / "local"
+    root.mkdir()
+    (root / "shared.txt").write_bytes(b"local-content")
+    remote_root = fake.ensure_folder_path("ElectriDrive/Wild")
+    wild_id = fake.add_file("shared.txt", b"pre-existing, never tracked", parent=remote_root)
+
+    db = SyncDatabase(tmp_path / "db.sqlite3")
+    try:
+        engine = UploadOnlySyncEngine(
+            drive_client=fake, database=db, rules=SyncRules(),
+            confirmed_remote_ids={"other.txt": wild_id},
+        )
+        result = engine.sync_up(root, "ElectriDrive/Wild")
+    finally:
+        db.close()
+
+    assert result.failed >= 1
+    assert any("not confirmed as belonging to this sync pair" in e for e in result.errors)
+    assert fake.nodes[wild_id]["content"] == b"pre-existing, never tracked"
 
 
 def test_engine_separate_pair_refuses_to_overwrite_claimed_file(tmp_path: Path) -> None:
@@ -77,7 +131,7 @@ def test_engine_separate_pair_refuses_to_overwrite_claimed_file(tmp_path: Path) 
     assert fake.nodes[claimed_id]["content"] == b"from-pair-a"
     assert second.uploaded == 1  # unique-b.txt
     assert second.failed >= 1
-    assert any("already tracked by a different sync pair" in e for e in second.errors)
+    assert any("not confirmed as belonging to this sync pair" in e for e in second.errors)
 
 
 def test_engine_renamed_local_file_without_collision_uploads_as_new(tmp_path: Path) -> None:
@@ -133,7 +187,7 @@ def test_engine_renamed_local_file_into_collision_is_blocked(tmp_path: Path) -> 
 
     assert fake.nodes[claimed_id]["content"] == b"from-pair-b"
     assert second.failed >= 1
-    assert any("already tracked by a different sync pair" in e for e in second.errors)
+    assert any("not confirmed as belonging to this sync pair" in e for e in second.errors)
 
 
 def test_engine_stale_remote_id_still_alive_is_followed_not_overwritten_elsewhere(tmp_path: Path) -> None:
@@ -198,7 +252,7 @@ def test_engine_stale_remote_id_trashed_blocks_rather_than_overwriting_unrelated
 
 # ------------------------------------------------------- twoway.py (sync --direction up_only)
 
-def test_twoway_up_only_first_sync_adopts_untracked_existing_file(tmp_path: Path) -> None:
+def test_twoway_up_only_first_sync_refuses_unconfirmed_untracked_existing_file(tmp_path: Path) -> None:
     fake = FakeDrive()
     root = tmp_path / "local"
     root.mkdir()
@@ -209,6 +263,27 @@ def test_twoway_up_only_first_sync_adopts_untracked_existing_file(tmp_path: Path
     db = SyncDatabase(tmp_path / "db.sqlite3")
     try:
         pair = _up_only_pair(root, "ElectriDrive/Wild")
+        report = TwoWaySyncEngine(fake, db, pair, rules=SyncRules()).run()
+    finally:
+        db.close()
+
+    assert report.failed >= 1
+    assert any("not confirmed as belonging to this sync pair" in e for e in report.errors)
+    assert fake.nodes[wild_id]["content"] == b"pre-existing, never tracked"
+
+
+def test_twoway_up_only_first_sync_adopts_untracked_file_with_explicit_confirmation(tmp_path: Path) -> None:
+    fake = FakeDrive()
+    root = tmp_path / "local"
+    root.mkdir()
+    (root / "shared.txt").write_bytes(b"local-content")
+    remote_root = fake.ensure_folder_path("ElectriDrive/Wild")
+    wild_id = fake.add_file("shared.txt", b"pre-existing, never tracked", parent=remote_root)
+
+    db = SyncDatabase(tmp_path / "db.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/Wild", direction="up_only", delete_policy="off",
+                        canonical_remote_ids={"shared.txt": wild_id})
         report = TwoWaySyncEngine(fake, db, pair, rules=SyncRules()).run()
     finally:
         db.close()
@@ -240,7 +315,7 @@ def test_twoway_up_only_separate_pair_refuses_to_overwrite_claimed_file(tmp_path
 
     assert fake.nodes[claimed_id]["content"] == b"from-pair-a"
     assert second.failed >= 1
-    assert any("already tracked by a different sync pair" in e for e in second.errors)
+    assert any("not confirmed as belonging to this sync pair" in e for e in second.errors)
 
 
 def test_twoway_up_only_renamed_local_file_into_collision_is_blocked(tmp_path: Path) -> None:
@@ -269,7 +344,7 @@ def test_twoway_up_only_renamed_local_file_into_collision_is_blocked(tmp_path: P
 
     assert fake.nodes[claimed_id]["content"] == b"from-pair-b"
     assert second.failed >= 1
-    assert any("already tracked by a different sync pair" in e for e in second.errors)
+    assert any("not confirmed as belonging to this sync pair" in e for e in second.errors)
 
 
 def test_twoway_up_only_stale_remote_id_trashed_blocks_rather_than_overwriting(tmp_path: Path) -> None:

@@ -46,6 +46,7 @@ class UploadOnlySyncEngine:
         log_callback: LogCallback | None = None,
         progress_callback: ProgressCallback | None = None,
         cancel_event=None,
+        confirmed_remote_ids: dict[str, str] | None = None,
     ):
         self.cancel_event = cancel_event
         self._file_scope = ""
@@ -54,6 +55,11 @@ class UploadOnlySyncEngine:
         self.rules = rules if rules is not None else SyncRules.full_backup()
         self.log_callback = log_callback
         self.progress_callback = progress_callback
+        # Explicit, caller-reviewed {relative_path: remote_id} mapping -- the
+        # only way an existing, untracked Drive file may be adopted on this
+        # pair's first sync. A missing database record does not prove a
+        # Drive file belongs to this job, so nothing is adopted without it.
+        self.confirmed_remote_ids = dict(confirmed_remote_ids or {})
 
     def _transfer(self, method, *args):
         """Older small adapters may not expose chunk progress callbacks."""
@@ -196,20 +202,21 @@ class UploadOnlySyncEngine:
                 finder = getattr(self.drive_client, "find_file", None)
                 found_id = finder(file_path.name, parent_id) if callable(finder) else None
 
-                # A name match is not ownership. Only this pair's own previously
-                # recorded remote_id may be trusted as an update target; a same-named
-                # file *another* sync pair already claimed must never be silently
-                # adopted and overwritten. Genuinely untracked ("wild") pre-existing
-                # content may still be adopted on this pair's first sync.
+                # A name match is not ownership, and a missing database record does
+                # not prove a Drive file belongs to this job. Only this pair's own
+                # previously recorded remote_id, or an explicit, caller-reviewed
+                # entry in confirmed_remote_ids, may be trusted as an update target.
+                # An existing Drive file with neither is never silently adopted.
                 if previous is None:
                     remote_id = None
                     if found_id is not None:
-                        if self.database.remote_id_owned_elsewhere(found_id, scope=self._file_scope):
+                        confirmed = self.confirmed_remote_ids.get(relative.as_posix())
+                        if confirmed != found_id:
                             raise RuntimeError(
                                 f"an existing Drive file named {file_path.name!r} in this folder "
-                                "is already tracked by a different sync pair; refusing to "
-                                "overwrite it without confirmation (rename/move it, or resolve "
-                                "manually)"
+                                "is not confirmed as belonging to this sync pair; review its "
+                                "identity and pass it via confirmed_remote_ids to adopt it "
+                                "(rename/move it, or resolve the conflict manually)"
                             )
                         remote_id = found_id
                 else:

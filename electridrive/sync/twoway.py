@@ -1434,26 +1434,27 @@ class TwoWaySyncEngine:
     def _confirm_upload_target(self, rel: str, candidate: RemoteEntry | None) -> RemoteEntry | None:
         """A name/path match at the upload target is not ownership.
 
-        Only a remote_id this pair has itself previously recorded for ``rel``
-        (via the sync-items history or an owner-reviewed duplicate decision)
-        may be trusted as something safe to overwrite. A same-named Drive
-        object this pair never created, or no longer owns, must never be
-        silently adopted as an update target.
+        A missing database mapping does not prove a Drive file belongs to
+        this sync job. Only a remote_id this pair has itself previously
+        recorded for ``rel`` -- via the sync-items history, or an explicit,
+        owner-reviewed entry in ``pair.canonical_remote_ids`` -- may be
+        trusted as something safe to overwrite. An existing Drive object
+        with no such confirmed mapping is never silently adopted, regardless
+        of whether any other pair happens to track it either; the caller
+        must review its identity and record canonical_remote_ids[rel]
+        (the same mechanism the duplicate-review dialog already writes)
+        before it can be used as an update target.
         """
         if candidate is None:
             return None
         owned_id = self._canonical_ids.get(rel)
         if owned_id is None:
-            # Genuinely untracked ("wild") pre-existing content may still be
-            # adopted on this pair's first sync; a file *another* pair already
-            # claimed must never be silently adopted and overwritten.
-            if self.db.remote_id_owned_elsewhere(candidate.file_id, pair_id=self.pair_id):
-                raise RuntimeError(
-                    f"an existing Drive file at {rel!r} is already tracked by a "
-                    "different sync pair; refusing to overwrite it without "
-                    "confirmation (rename/move it, or resolve the conflict manually)"
-                )
-            return candidate
+            raise RuntimeError(
+                f"an existing Drive file at {rel!r} is not confirmed as belonging to "
+                "this sync pair; review its identity and record it in "
+                "canonical_remote_ids before retrying (rename/move it, or resolve the "
+                "conflict manually)"
+            )
         if candidate.file_id == owned_id:
             return candidate
         verify = getattr(self.client, "get_metadata", None)

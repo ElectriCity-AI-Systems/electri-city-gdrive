@@ -53,6 +53,54 @@ def test_sync_interval_runs_sequentially_and_stops_after_failure(tmp_path, monke
     assert calls == [1]
 
 
+def test_sync_up_cli_refuses_untracked_file_without_confirmation(tmp_path, monkeypatch):
+    from electridrive import cli
+    from fakes import FakeDrive
+    for key in ('XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME'):
+        monkeypatch.setenv(key, str(tmp_path / key))
+    local = tmp_path / 'local'
+    local.mkdir()
+    (local / 'shared.txt').write_bytes(b'local-content')
+    drive = FakeDrive()
+    remote_root = drive.ensure_folder_path('ElectriDrive/CliConfirm')
+    wild_id = drive.add_file('shared.txt', b'pre-existing, never tracked', parent=remote_root)
+    monkeypatch.setattr(cli, 'GoogleDriveClient', lambda: drive)
+    args = cli.build_parser().parse_args(
+        ['sync-up', str(local), '--remote-folder', 'ElectriDrive/CliConfirm'])
+    assert cli.cmd_sync_up(args) == 2
+    assert drive.nodes[wild_id]['content'] == b'pre-existing, never tracked'
+
+
+def test_sync_up_cli_confirm_remote_id_flag_allows_adoption(tmp_path, monkeypatch):
+    from electridrive import cli
+    from fakes import FakeDrive
+    for key in ('XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME'):
+        monkeypatch.setenv(key, str(tmp_path / key))
+    local = tmp_path / 'local'
+    local.mkdir()
+    (local / 'shared.txt').write_bytes(b'local-content')
+    drive = FakeDrive()
+    remote_root = drive.ensure_folder_path('ElectriDrive/CliConfirm')
+    wild_id = drive.add_file('shared.txt', b'pre-existing, never tracked', parent=remote_root)
+    monkeypatch.setattr(cli, 'GoogleDriveClient', lambda: drive)
+    args = cli.build_parser().parse_args([
+        'sync-up', str(local), '--remote-folder', 'ElectriDrive/CliConfirm',
+        '--confirm-remote-id', f'shared.txt={wild_id}',
+    ])
+    assert cli.cmd_sync_up(args) == 0
+    assert drive.nodes[wild_id]['content'] == b'local-content'
+
+
+def test_parse_confirmed_remote_ids_rejects_malformed_entries():
+    import pytest
+    from electridrive.cli import _parse_confirmed_remote_ids
+    assert _parse_confirmed_remote_ids(None) == {}
+    assert _parse_confirmed_remote_ids(['a.txt=1abc']) == {'a.txt': '1abc'}
+    for bad in ('no-equals-sign', '=missing-rel', 'missing-id='):
+        with pytest.raises(ValueError):
+            _parse_confirmed_remote_ids([bad])
+
+
 def test_mount_immediate_failure_has_nonzero_exit(tmp_path, monkeypatch):
     from electridrive import cli
     monkeypatch.setattr(cli, 'configure_logging', lambda: None)

@@ -41,9 +41,21 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_confirmed_remote_ids(pairs: list[str] | None) -> dict[str, str]:
+    """Parse repeated --confirm-remote-id REL=ID options into a dict."""
+    confirmed: dict[str, str] = {}
+    for item in pairs or []:
+        rel, sep, remote_id = item.partition("=")
+        if not sep or not rel or not remote_id:
+            raise ValueError(f"--confirm-remote-id must be REL=ID, got {item!r}")
+        confirmed[rel] = remote_id
+    return confirmed
+
+
 def cmd_sync_up(args: argparse.Namespace) -> int:
     qa.validate_pair(SyncPair(local_path=str(Path(args.local_folder).expanduser()),
                               remote_folder=args.remote_folder, direction="up_only", delete_policy="off"))
+    confirmed_remote_ids = _parse_confirmed_remote_ids(getattr(args, "confirm_remote_id", None))
     paths = get_paths()
     db = SyncDatabase(paths.database_file)
     try:
@@ -51,6 +63,7 @@ def cmd_sync_up(args: argparse.Namespace) -> int:
             drive_client=GoogleDriveClient(),
             database=db,
             log_callback=lambda msg: print(msg),
+            confirmed_remote_ids=confirmed_remote_ids,
         )
         result = engine.sync_up(Path(args.local_folder), args.remote_folder)
         return 0 if result.failed == 0 else 2
@@ -70,7 +83,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     try:
         pair = SyncPair(local_path=str(Path(args.local_folder).expanduser()),
                         remote_folder=args.remote_folder, direction=args.direction,
-                        delete_policy="off" if qa.current_policy() else "trash")
+                        delete_policy="off" if qa.current_policy() else "trash",
+                        canonical_remote_ids=_parse_confirmed_remote_ids(
+                            getattr(args, "confirm_remote_id", None)))
         qa.validate_pair(pair)
         engine = TwoWaySyncEngine(GoogleDriveClient(), db, pair, log_cb=print)
         def run():
@@ -199,6 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_up = sub.add_parser("sync-up", help="Upload-only sync (safe, never deletes)")
     p_up.add_argument("local_folder")
     p_up.add_argument("--remote-folder", required=True)
+    p_up.add_argument(
+        "--confirm-remote-id", action="append", metavar="REL=ID", default=[],
+        help="Explicitly confirm that the existing Drive file ID belongs to this sync "
+             "pair at the given local relative path, after reviewing its identity. "
+             "Repeatable. Required to adopt any pre-existing, untracked Drive file.",
+    )
     p_up.set_defaults(func=cmd_sync_up)
 
     p_sync = sub.add_parser("sync", help="Two-way sync a local folder with Drive")
@@ -208,6 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default="two_way")
     p_sync.add_argument("--interval", type=float,
                         help="Repeat sequentially every N seconds; stop on sync errors")
+    p_sync.add_argument(
+        "--confirm-remote-id", action="append", metavar="REL=ID", default=[],
+        help="Explicitly confirm that the existing Drive file ID belongs to this sync "
+             "pair at the given local relative path, after reviewing its identity. "
+             "Repeatable. Required to adopt any pre-existing, untracked Drive file.",
+    )
     p_sync.set_defaults(func=cmd_sync)
 
     sub.add_parser(
