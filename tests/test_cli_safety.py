@@ -57,7 +57,7 @@ def test_mount_immediate_failure_has_nonzero_exit(tmp_path, monkeypatch):
     from electridrive import cli
     monkeypatch.setattr(cli, 'configure_logging', lambda: None)
     monkeypatch.setattr('electridrive.vfs.fuse_available', lambda: True)
-    monkeypatch.setattr(cli, 'GoogleDriveClient', lambda: object())
+    monkeypatch.setattr(cli, 'GoogleDriveClient', object)
     def fail(*a, **kw):
         raise RuntimeError('binding refused mount')
     monkeypatch.setattr('electridrive.vfs.FuseMount.start', fail)

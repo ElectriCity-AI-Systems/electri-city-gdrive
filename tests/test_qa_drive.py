@@ -109,7 +109,7 @@ def test_qa_oauth_token_symlink_is_refused(policy, tmp_path):
 
 def test_qa_google_construction_autowraps(policy, monkeypatch):
     import electridrive.google_api.client as module
-    monkeypatch.setattr(module, 'authenticate_interactive', lambda: object())
+    monkeypatch.setattr(module, 'authenticate_interactive', object)
     assert isinstance(module.GoogleDriveClient(), QaDriveClient)
 
 

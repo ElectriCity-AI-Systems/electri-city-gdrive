@@ -9,7 +9,7 @@ def test_qa_init_precedes_logging(tmp_path, monkeypatch):
 
 
 def test_qa_mount_stops_before_fuse(monkeypatch):
-    monkeypatch.setattr(qa, 'current_policy', lambda: object())
+    monkeypatch.setattr(qa, 'current_policy', object)
     assert cli.cmd_mount(cli.argparse.Namespace()) == 2
 
 
