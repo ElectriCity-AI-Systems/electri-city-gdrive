@@ -400,8 +400,6 @@ class FuseMount:
         self._thread.start()
         self._thread.join(timeout=0.05)
         if self._error is not None:
-            if isinstance(self._error, qa.QaSafetyError):
-                raise self._error from None
             raise RuntimeError(str(self._error)) from self._error
 
     def wait(self):
@@ -409,8 +407,6 @@ class FuseMount:
         if self._thread:
             self._thread.join()
         if self._error is not None:
-            if isinstance(self._error, qa.QaSafetyError):
-                raise self._error from None
             raise RuntimeError(str(self._error)) from self._error
 
     def stop(self):

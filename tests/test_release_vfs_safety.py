@@ -119,6 +119,36 @@ def test_immediate_fuse_failure_is_reported_to_start_and_wait(tmp_path, monkeypa
     assert not mount.is_mounted
 
 
+def test_fuse_qa_safety_error_keeps_wrapped_runtime_error_contract(
+    tmp_path, monkeypatch, caplog,
+):
+    import sys
+    from types import SimpleNamespace
+    import electridrive.vfs.fuse_mount as module
+    from electridrive import qa_policy as qa
+
+    def fail(*args, **kwargs):
+        raise qa.QaSafetyError('QA safety stop: FUSE is disabled')
+
+    monkeypatch.setattr(module, 'fuse_available', lambda: True)
+    monkeypatch.setattr(module, 'create_operations_class', lambda: lambda *a: object())
+    monkeypatch.setitem(sys.modules, 'fuse', SimpleNamespace(FUSE=fail))
+    mount = FuseMount(FakeDrive(), tmp_path / 'cache')
+
+    with caplog.at_level('WARNING', logger='electridrive.qa.safety'):
+        with pytest.raises(RuntimeError, match='QA safety stop \\[runtime/qa-fuse-disabled\\]') as start_error:
+            mount.start(str(tmp_path / 'mount'))
+        with pytest.raises(RuntimeError, match='QA safety stop \\[runtime/qa-fuse-disabled\\]') as wait_error:
+            mount.wait()
+
+    assert type(start_error.value) is RuntimeError
+    assert type(wait_error.value) is RuntimeError
+    assert isinstance(start_error.value.__cause__, qa.QaSafetyError)
+    assert isinstance(wait_error.value.__cause__, qa.QaSafetyError)
+    assert start_error.value.__cause__.rule == 'qa-fuse-disabled'
+    assert wait_error.value.__cause__.rule == 'qa-fuse-disabled'
+
+
 def test_fuse_binary_size_uses_remote_metadata_not_corrupt_cache(tmp_path, monkeypatch):
     import sys
     from types import SimpleNamespace

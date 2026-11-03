@@ -269,3 +269,50 @@ Geheimnisse, Tokens, private Profileinstellungen und persönliche Daten sind
 nicht enthalten. Seit dem ursprünglichen abgebrochenen Live-Versuch wurden für
 diese Diagnoseänderungen keine Google-Drive-Aufrufe oder Cloud-Änderungen
 vorgenommen.
+
+## Code-Quality- und Abhängigkeitsprüfung für PR #22
+
+Am 2026-11-03 wurden die zwei offenen Inline-Hinweise des GitHub-Code-Quality-
+Bots in `electridrive/vfs/fuse_mount.py` geprüft. Beide beanstandeten das
+direkte `raise self._error`, weil das Attribut optional ist. Die QA-Sonderfälle
+wurden entfernt; `start()` und `wait()` bewahren wieder den bisherigen Vertrag:
+ein im Mount-Thread gespeicherter Fehler wird als `RuntimeError(str(error))`
+mit dem ursprünglichen Fehler als `__cause__` weitergegeben. Der neue
+Offline-Regressionstest prüft diesen Vertrag auch für `QaSafetyError`. Die
+strukturierte, bereinigte QA-Diagnose wird im Mount-Thread protokolliert, ohne
+den nach außen sichtbaren Exception-Typ oder die Exception-Kette zu verändern.
+
+Die fünf offenen Dependabot-Warnungen wurden gegen die GitHub-Advisories
+geprüft. Sie betreffen ausschließlich exakte Versionen in
+`packaging/requirements-release.txt`; die PR-Basis und der damalige
+Release-Pin waren ebenfalls betroffen:
+
+| Alert | Paket / alter Pin | Risiko laut Advisory | Minimaler Patch |
+|---|---|---|---|
+| [#7](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/security/dependabot/7), GHSA-6q48-6c7w-9gw2 | `certifi==2026.7.22` | **Critical**: der Trust Store enthielt emSign-Root-Zertifikate, zu denen kompromittierte Zwischenzertifikate existierten. Ein Angreifer mit betroffenem Schlüssel und On-Path-Position kann TLS-Verbindungen zu beliebigen Hostnamen imitieren bzw. verändern. Das CVSS-Feld der Advisory ist nicht bewertet; die Critical-Einstufung ist der GitHub-Severity-Wert. | `certifi==2026.10.19` entfernt die kompromittierten emSign-Roots und stellt nicht betroffene Roots wieder bereit. |
+| [#8](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/security/dependabot/8), GHSA-fm9c-5rcf-2q5p | `pyasn1==0.6.4` | **High**, CVE-2026-119194, CVSS 7.5: quadratische CPU-Kosten in schemaloser BER/CER/DER-Container-Dekodierung mit speziell konstruiertem Input. | `pyasn1==0.6.5` |
+| [#9](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/security/dependabot/9), GHSA-9m75-vc3g-4x39 | `pyasn1==0.6.4` | **High**, CVE-2026-119195, CVSS 7.5: quadratische CPU-Kosten bei konstruierten Strings und indefinite-length `ANY`. | `pyasn1==0.6.5` |
+| [#10](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/security/dependabot/10), GHSA-mm57-4v3p-rchx | `pyasn1==0.6.4` | **High**, CVE-2026-119197, CVSS 7.5: quadratische CPU-Kosten beim Dekodieren binärer ASN.1-REAL-Werte. | `pyasn1==0.6.5` |
+| [#11](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/security/dependabot/11), GHSA-2qm8-x737-gmw5 | `pyasn1==0.6.4` | **High**, CVE-2026-119196, CVSS 7.5: quadratische CPU-Kosten bei konstruierten BIT-STRING-Werten. | `pyasn1==0.6.5` |
+
+Die vier `pyasn1`-Advisories betreffen Availability durch CPU-Verbrauch bei
+untrusted ASN.1-Daten; sie beschreiben keine Vertraulichkeits- oder
+Integritätsverletzung. Im ElectriDrive-Quellcode wurde kein direkter
+`pyasn1`-Decoder-Aufruf gefunden; die Bibliothek kommt als transitive
+Abhängigkeit des Google-Auth-Stacks hinein. Die konkrete Erreichbarkeit eines
+betroffenen Decoders über die von ElectriDrive akzeptierten Daten ist daher
+nicht bestätigt. Der Patch ist dennoch sinnvoll und kompatibel: die
+festgelegte `pyasn1-modules==0.4.2`-Abhängigkeit verlangt `pyasn1>=0.6.1,<0.7.0`,
+was Version 0.6.5 erfüllt. Es wurden keine größeren oder nicht betroffenen
+Abhängigkeiten aktualisiert.
+
+Die Release-Pins wurden auf `certifi==2026.10.19` und `pyasn1==0.6.5`
+aktualisiert. Die Dependabot-Alerts werden auf dem Default-Branch erst nach
+Merge bzw. dessen erneuter Dependency-Auswertung geschlossen; dieser PR wurde
+nicht gemergt. Mit den exakten Release-Versionen in der lokalen virtuellen
+Umgebung bestanden `pip check` ohne Abhängigkeitskonflikte, der Compile-Check
+und die vollständige Offline-Suite (`651 passed in 5.76s`). Der fokussierte
+FUSE-Test bestand mit 15 Tests. Ein separates lokales `pip-audit`/Bandit-Tool
+ist in der Umgebung nicht installiert; daher wurde kein lokaler Scannerlauf
+behauptet. GitHub CodeQL und die Paket-/Python-CI laufen nach dem Push auf dem
+aktualisierten PR-Commit und werden im PR-Status geprüft.
