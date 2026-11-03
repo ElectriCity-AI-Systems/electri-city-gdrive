@@ -314,5 +314,10 @@ Umgebung bestanden `pip check` ohne Abhängigkeitskonflikte, der Compile-Check
 und die vollständige Offline-Suite (`651 passed in 5.76s`). Der fokussierte
 FUSE-Test bestand mit 15 Tests. Ein separates lokales `pip-audit`/Bandit-Tool
 ist in der Umgebung nicht installiert; daher wurde kein lokaler Scannerlauf
-behauptet. GitHub CodeQL und die Paket-/Python-CI laufen nach dem Push auf dem
-aktualisierten PR-Commit und werden im PR-Status geprüft.
+behauptet. Für Commit `707eb7e00696f6231738f33c99ff3fa4fba3d479` bestanden
+GitHub CodeQL, die Python-CI für 3.10, 3.11, 3.12, 3.13 und 3.14 sowie die
+Debian-Paket-Builds auf Ubuntu 22.04 und 24.04. Beide Code-Quality-
+Review-Threads für `fuse_mount.py` sind nach der Korrektur als erledigt
+markiert. Der PR bleibt offen und ungemergt; die fünf Dependabot-Warnungen
+werden deshalb auf `main` erst nach einem späteren Merge und Dependency-Scan
+geschlossen.
