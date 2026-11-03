@@ -1,0 +1,25 @@
+[Unit]
+Description=Retry definite ElectriDrive Pro license delivery failures
+Documentation=file:/opt/electridrive-license/app/server/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=electridrive-license
+Group=electridrive-license
+WorkingDirectory=/opt/electridrive-license/app
+EnvironmentFile=/etc/electridrive-license.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/electridrive-license/.venv/bin/python -m server.license_retry
+UMask=0077
+StateDirectory=electridrive-license
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

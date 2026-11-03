@@ -1,0 +1,11 @@
+[Unit]
+Description=ElectriDrive two-way synchronization (opt-in)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Edit both paths; initialize and test this pair interactively before enabling.
+WorkingDirectory=%h/electri-city-gdrive
+ExecStart=%h/electri-city-gdrive/.venv/bin/python -m electridrive.cli sync %h/Documents --remote-folder ElectriDrive/Documents
+Nice=10

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +36,11 @@ def plan_upload(client, local_path: Path, parent_id: str, rules: SyncRules | Non
     are honored. `client` needs `.find_folder(name, parent)` (optional) and
     `.create_folder(name, parent)`.
     """
+    qa.check_startup()
+    qa.require_local(local_path)
+    client = qa.restrict_client(client)
+    if qa.current_policy():
+        client.get_metadata(parent_id)
     local_path = Path(local_path).expanduser()
     rules = rules if rules is not None else SyncRules.full_backup()
     items: list[UploadItem] = []

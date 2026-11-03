@@ -123,7 +123,11 @@ class DrivePathReviewDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(12)
 
-        headline = QLabel("Several Google Drive files have the same path.")
+        headline = QLabel(
+            "The previously selected Google Drive file needs review."
+            if len(conflict.candidates) < 2 else
+            "Several Google Drive files have the same path."
+        )
         headline.setObjectName("ReviewHeadline")
         headline.setWordWrap(True)
         headline.setStyleSheet(f"font-size: 17px; font-weight: 700; color: {palette.text};")
@@ -160,10 +164,18 @@ class DrivePathReviewDialog(QDialog):
 
         self.choice = QComboBox(self)
         self.choice.setObjectName("ReviewCanonicalChoice")
+        # A stale stored choice may leave only one surviving candidate.
+        # It still requires explicit owner selection, never a default.
+        native_upload_target = (
+            conflict.direction == "up_only"
+            and any((candidate.mime_type or "").startswith(
+                "application/vnd.google-apps.") for candidate in conflict.candidates)
+        )
         selectable = (
             not conflict.resolved
-            and len(conflict.candidates) >= 2
+            and len(conflict.candidates) >= 1
             and all(not candidate.is_folder for candidate in conflict.candidates)
+            and not native_upload_target
         )
         if selectable:
             info = QLabel(
@@ -184,11 +196,14 @@ class DrivePathReviewDialog(QDialog):
             self.choice.setVisible(False)
 
         warning = QLabel(
-            "Saving a choice makes NO changes in Drive. A separately started "
-            "Sync now may update the chosen Drive file. Cancel to keep everything unchanged."
-            if selectable else
-            "No automatic selection or file changes will be made. "
-            "Close to leave this conflict unresolved."
+            "Candidates are from the last scan; this dialog does not check Drive. "
+            + (
+                "Saving a choice makes NO changes in Drive. A separately started "
+                "Sync now may update the chosen Drive file. Cancel to keep everything unchanged."
+                if selectable else
+                "No automatic selection or file changes will be made. "
+                "Close to leave this conflict unresolved."
+            )
         )
         warning.setObjectName("ReviewSafetyWarning")
         warning.setTextFormat(Qt.PlainText)
@@ -213,6 +228,15 @@ class DrivePathReviewDialog(QDialog):
             actions.addWidget(self.save_choice)
         else:
             self.save_choice.setVisible(False)
+        # With no surviving object, the owner can explicitly clear the stale
+        # association. This changes settings only; it does not run sync.
+        self.clear_choice = QPushButton("Clear missing selection", self)
+        self.clear_choice.setObjectName("ClearMissingSelection")
+        self.clear_choice.setVisible(not conflict.candidates)
+        self._clear_requested = False
+        self.clear_choice.clicked.connect(self._confirm_clear)
+        if not conflict.candidates:
+            actions.addWidget(self.clear_choice)
         layout.addLayout(actions)
 
     def _render_candidates(self, palette: Palette) -> str:
@@ -247,6 +271,13 @@ class DrivePathReviewDialog(QDialog):
     def _confirm_selection(self):
         if self.choice.currentData() is not None:
             self.accept()
+
+    def _confirm_clear(self):
+        self._clear_requested = True
+        self.accept()
+
+    def cleared_choice(self) -> bool:
+        return self.result() == QDialog.DialogCode.Accepted and self._clear_requested
 
     def selected_file_id(self) -> str | None:
         if self.result() != QDialog.DialogCode.Accepted:

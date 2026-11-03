@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from electridrive.config import get_paths
+from electridrive import qa_policy as qa
 
 
 class JsonlHandler(logging.Handler):
     def __init__(self, path: Path):
         super().__init__()
         self.path = path
+        if qa.current_policy() and path != get_paths().log_file:
+            raise qa.QaSafetyError("QA safety stop: log must belong to the isolated profile")
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -27,8 +30,12 @@ class JsonlHandler(logging.Handler):
             }
             if record.exc_info:
                 payload["exception"] = "".join(traceback.format_exception(*record.exc_info))
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            line = json.dumps(payload, ensure_ascii=False) + "\n"
+            if qa.current_policy():
+                qa.append_log(self.path, line)
+            else:
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
         except Exception:  # logging must never crash the caller (esp. worker threads)
             self.handleError(record)
 

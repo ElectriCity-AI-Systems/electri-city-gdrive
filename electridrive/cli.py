@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import logging
 import platform
+import sys
+
+from electridrive import qa_policy as qa
 from pathlib import Path
 
 from electridrive.config import SyncPair, get_paths, load_settings, selected_scopes
 from electridrive.google_api.client import GoogleDriveClient
 from electridrive.logging_setup import configure_logging
 from electridrive.storage.database import SyncDatabase
-from electridrive.sync.downloader import plan_download
 from electridrive.sync.engine import UploadOnlySyncEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -32,14 +34,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    client = GoogleDriveClient()
+    client = qa.restrict_client(GoogleDriveClient())
     files = client.list_files(limit=args.limit)
     for item in files:
         print(f"{item.id}\t{item.name}\t{item.mime_type or ''}\t{item.size or ''}")
     return 0
 
 
+def _parse_confirmed_remote_ids(pairs: list[str] | None) -> dict[str, str]:
+    """Parse repeated --confirm-remote-id REL=ID options into a dict."""
+    confirmed: dict[str, str] = {}
+    for item in pairs or []:
+        rel, sep, remote_id = item.partition("=")
+        if not sep or not rel or not remote_id:
+            raise ValueError(f"--confirm-remote-id must be REL=ID, got {item!r}")
+        confirmed[rel] = remote_id
+    return confirmed
+
+
 def cmd_sync_up(args: argparse.Namespace) -> int:
+    qa.validate_pair(SyncPair(local_path=str(Path(args.local_folder).expanduser()),
+                              remote_folder=args.remote_folder, direction="up_only", delete_policy="off"))
+    confirmed_remote_ids = _parse_confirmed_remote_ids(getattr(args, "confirm_remote_id", None))
     paths = get_paths()
     db = SyncDatabase(paths.database_file)
     try:
@@ -47,6 +63,7 @@ def cmd_sync_up(args: argparse.Namespace) -> int:
             drive_client=GoogleDriveClient(),
             database=db,
             log_callback=lambda msg: print(msg),
+            confirmed_remote_ids=confirmed_remote_ids,
         )
         result = engine.sync_up(Path(args.local_folder), args.remote_folder)
         return 0 if result.failed == 0 else 2
@@ -57,19 +74,34 @@ def cmd_sync_up(args: argparse.Namespace) -> int:
 def cmd_sync(args: argparse.Namespace) -> int:
     from electridrive.sync.twoway import TwoWaySyncEngine
 
+    from electridrive.sync_schedule import periodic_sync, validate_interval
+    interval = getattr(args, "interval", None)
+    if interval is not None:
+        validate_interval(interval)
     paths = get_paths()
     db = SyncDatabase(paths.database_file)
     try:
         pair = SyncPair(local_path=str(Path(args.local_folder).expanduser()),
-                        remote_folder=args.remote_folder, direction=args.direction)
+                        remote_folder=args.remote_folder, direction=args.direction,
+                        delete_policy="off" if qa.current_policy() else "trash",
+                        canonical_remote_ids=_parse_confirmed_remote_ids(
+                            getattr(args, "confirm_remote_id", None)))
+        qa.validate_pair(pair)
         engine = TwoWaySyncEngine(GoogleDriveClient(), db, pair, log_cb=print)
-        report = engine.run()
-        print(f"Done. up={report.uploaded} down={report.downloaded} "
-              f"trash_remote={report.trashed_remote} trash_local={report.trashed_local} "
-              f"conflicts={report.conflicts} failed={report.failed}")
-        for err in report.errors:
-            print(f"  ! {err}")
-        return 0 if report.failed == 0 else 2
+        def run():
+            qa.check_startup()
+            qa.validate_pair(pair)
+            return engine.run()
+        reports = periodic_sync(run, interval) if interval is not None else (run(),)
+        failed = False
+        for report in reports:
+            print(f"Done. up={report.uploaded} down={report.downloaded} "
+                  f"trash_remote={report.trashed_remote} trash_local={report.trashed_local} "
+                  f"conflicts={report.conflicts} failed={report.failed}")
+            for err in report.errors:
+                print(f"  ! {err}")
+            failed = failed or bool(report.failed or report.unexplained_omissions)
+        return 2 if failed else 0
     finally:
         db.close()
 
@@ -96,25 +128,31 @@ def cmd_sync_configured(args: argparse.Namespace) -> int:
 
 
 def cmd_download(args: argparse.Namespace) -> int:
-    client = GoogleDriveClient()
+    qa.require_local(Path(args.dest).expanduser(), exists=False)
+    client = qa.restrict_client(GoogleDriveClient())
     remote = client.get_metadata(args.file_id)
     dest = Path(args.dest).expanduser()
-    items = plan_download(client, remote, dest)
-    failed = 0
-    for it in items:
-        try:
-            if it.is_google_doc:
-                client.export_file(it.file_id, it.dest_path, it.export_mime)
+    from electridrive.transfers import TransferManager, TransferState
+    manager = TransferManager(client)
+    try:
+        manager.enqueue_download(remote, dest)
+        manager.wait_idle()
+        failed = 0
+        for transfer in manager.snapshot():
+            if transfer.state == TransferState.DONE:
+                print(f"downloaded {transfer.dest_path}")
             else:
-                client.download_file(it.file_id, it.dest_path)
-            print(f"downloaded {it.dest_path}")
-        except Exception as exc:
-            failed += 1
-            print(f"FAILED {it.name}: {exc}")
-    return 0 if failed == 0 else 2
+                failed += 1
+                print(f"FAILED {transfer.name}: {transfer.error or transfer.state.value}")
+        return 0 if failed == 0 else 2
+    finally:
+        manager.shutdown(wait=True)
 
 
 def cmd_mount(args: argparse.Namespace) -> int:
+    if qa.current_policy():
+        print("QA safety: Virtual Drive/FUSE is disabled.")
+        return 2
     from electridrive.vfs import FuseMount, fuse_available
 
     if getattr(args, "writable", False):
@@ -146,7 +184,11 @@ def cmd_unmount(args: argparse.Namespace) -> int:
     if not tool:
         print("fusermount not found.")
         return 1
-    subprocess.run([tool, "-u", args.mountpoint], check=False)
+    result = subprocess.run([tool, "-u", args.mountpoint], check=False,
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        print(f"Unmount failed: {getattr(result, 'stderr', '') or result.returncode}")
+        return 1
     print(f"Unmounted {args.mountpoint}")
     return 0
 
@@ -154,6 +196,14 @@ def cmd_unmount(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="electridrive", description="ElectriDrive — Electric-City Drive for Linux")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("qa-init", help="Seal an empty synthetic QA profile")
+    p_init.add_argument("--profile", required=True)
+    p_init.add_argument("--local-root", required=True)
+    p_init.set_defaults(func=cmd_qa_init)
+    p_create = sub.add_parser("qa-create-folder", help="Explicitly create a new synthetic cloud root")
+    p_create.add_argument("--name", required=True)
+    p_create.set_defaults(func=cmd_qa_create_folder)
 
     sub.add_parser("doctor", help="Show local configuration status").set_defaults(func=cmd_doctor)
 
@@ -164,6 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_up = sub.add_parser("sync-up", help="Upload-only sync (safe, never deletes)")
     p_up.add_argument("local_folder")
     p_up.add_argument("--remote-folder", required=True)
+    p_up.add_argument(
+        "--confirm-remote-id", action="append", metavar="REL=ID", default=[],
+        help="Explicitly confirm that the existing Drive file ID belongs to this sync "
+             "pair at the given local relative path, after reviewing its identity. "
+             "Repeatable. Required to adopt any pre-existing, untracked Drive file.",
+    )
     p_up.set_defaults(func=cmd_sync_up)
 
     p_sync = sub.add_parser("sync", help="Two-way sync a local folder with Drive")
@@ -171,6 +227,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--remote-folder", required=True)
     p_sync.add_argument("--direction", choices=["two_way", "up_only", "down_only"],
                         default="two_way")
+    p_sync.add_argument("--interval", type=float,
+                        help="Repeat sequentially every N seconds; stop on sync errors")
+    p_sync.add_argument(
+        "--confirm-remote-id", action="append", metavar="REL=ID", default=[],
+        help="Explicitly confirm that the existing Drive file ID belongs to this sync "
+             "pair at the given local relative path, after reviewing its identity. "
+             "Repeatable. Required to adopt any pre-existing, untracked Drive file.",
+    )
     p_sync.set_defaults(func=cmd_sync)
 
     sub.add_parser(
@@ -196,11 +260,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def cmd_qa_init(args):
+    policy = qa.initialize(args.profile, args.local_root)
+    print(f"QA profile initialized: {policy.profile}")
+    return 0
+
+
+def cmd_qa_create_folder(args):
+    if not qa.current_policy():
+        raise qa.QaSafetyError("QA safety stop: select --qa-profile first")
+    print(GoogleDriveClient().create_qa_root(args.name))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    configure_logging()
-    parser = build_parser()
-    args = parser.parse_args(argv)
     try:
+        arguments = list(sys.argv[1:] if argv is None else argv)
+        # Initialization must not discover or write ordinary settings/log files.
+        if arguments and arguments[0] == "qa-init":
+            args = build_parser().parse_args(arguments)
+            return int(args.func(args))
+        arguments = qa.bootstrap_profile(arguments)
+        args = build_parser().parse_args(arguments)
+        qa.check_startup()
+        configure_logging()
         return int(args.func(args))
     except KeyboardInterrupt:
         print("Cancelled")

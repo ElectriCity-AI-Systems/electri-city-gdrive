@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import mimetypes
 import os
 import stat
 import tempfile
@@ -21,7 +23,7 @@ ProgressCB = Callable[[int, int], None]  # (bytes_done, total_bytes)
 # Fields requested for every file listing. Kept in one place so all calls agree.
 _FILE_FIELDS = (
     "id, name, mimeType, size, modifiedTime, parents, trashed, starred, "
-    "md5Checksum, webViewLink, iconLink"
+    "md5Checksum, webViewLink, iconLink, appProperties"
 )
 
 # Google Workspace docs are not real binary files; they must be exported.
@@ -46,6 +48,12 @@ DEFAULT_EXPORT: tuple[str, str] = ("application/pdf", ".pdf")
 @contextmanager
 def _atomic_download_file(destination: Path) -> Iterator[BinaryIO]:
     """Keep the destination intact until all bytes and progress callbacks succeed."""
+    from electridrive.qa_policy import current_policy
+    policy = current_policy()
+    if policy:
+        with policy.atomic_writer(destination) as handle:
+            yield handle
+        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = stat.S_IMODE(destination.stat().st_mode)
@@ -92,6 +100,7 @@ class RemoteFile:
     md5_checksum: str | None = None
     web_view_link: str | None = None
     icon_link: str | None = None
+    app_properties: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_folder(self) -> bool:
@@ -120,6 +129,7 @@ class RemoteFile:
             md5_checksum=item.get("md5Checksum"),
             web_view_link=item.get("webViewLink"),
             icon_link=item.get("iconLink"),
+            app_properties=dict(item.get("appProperties") or {}),
         )
 
 
@@ -146,6 +156,8 @@ class FileListing:
 
 
 class DriveClientProtocol(Protocol):
+    @property
+    def account_key(self) -> str: ...
     def find_folder(self, name: str, parent_id: str | None = ...) -> str | None: ...
     def find_file(self, name: str, parent_id: str) -> str | None: ...
     def create_folder(self, name: str, parent_id: str | None = ...) -> str: ...
@@ -173,7 +185,32 @@ class GoogleDriveClient:
     optional dependencies installed (keeps the core test-able / headless).
     """
 
+    def __getattribute__(self, name):
+        if not name.startswith("_"):
+            from electridrive.qa_policy import current_policy, QaSafetyError
+            policy = current_policy()
+            if policy and object.__getattribute__(self, "__dict__").get("_qa_profile") != str(policy.profile):
+                raise QaSafetyError("QA safety stop: pre-existing ordinary Google client forbidden")
+        return object.__getattribute__(self, name)
+
+    def __new__(cls, service=None, credentials=None):
+        from electridrive.qa_policy import current_policy, QaSafetyError
+        policy = current_policy()
+        if policy:
+            if service is not None or credentials is not None:
+                raise QaSafetyError("QA safety stop: injected Google credentials/service forbidden")
+            raw = object.__new__(cls)
+            raw.__init__()
+            from electridrive.qa_drive import QaDriveClient
+            return QaDriveClient(raw, policy)
+        return object.__new__(cls)
+
     def __init__(self, service=None, credentials=None):
+        self._account_key = None
+        self._account_lock = threading.Lock()
+        from electridrive.qa_policy import current_policy
+        policy = current_policy()
+        self._qa_profile = str(policy.profile) if policy else None
         # httplib2 (and the built service) are NOT thread-safe. The UI uses a thread
         # pool and the transfer manager has its own worker threads, so each thread gets
         # its own service built from shared credentials (see the `service` property).
@@ -203,6 +240,22 @@ class GoogleDriveClient:
             self._local.service = svc
         return svc
 
+    @property
+    def account_key(self) -> str:
+        with self._account_lock:
+            if self._account_key is None:
+                about = self.service.about().get(
+                    fields="user(permissionId,emailAddress)"
+                ).execute(num_retries=3)
+                user = about.get("user", {})
+                if user.get("permissionId"):
+                    self._account_key = "permission:" + user["permissionId"]
+                elif user.get("emailAddress"):
+                    self._account_key = "email:" + user["emailAddress"].casefold()
+                else:
+                    raise ValueError("Drive did not provide a stable account identity")
+            return self._account_key
+
     @staticmethod
     def _escape_query_text(value: str) -> str:
         return value.replace("\\", "\\\\").replace("'", "\\'")
@@ -217,14 +270,7 @@ class GoogleDriveClient:
         ]
         if parent_id:
             query.append(f"'{parent_id}' in parents")
-        response = self.service.files().list(
-            q=" and ".join(query),
-            spaces="drive",
-            fields="files(id, name)",
-            pageSize=10,
-        ).execute()
-        files = response.get("files", [])
-        return files[0]["id"] if files else None
+        return self._unique_path_match(query, name, binary_only=False)
 
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
         metadata = {"name": name, "mimeType": DRIVE_FOLDER_MIME}
@@ -232,6 +278,11 @@ class GoogleDriveClient:
             metadata["parents"] = [parent_id]
         created = self.service.files().create(body=metadata, fields="id").execute()
         return created["id"]
+
+    def _create_qa_folder(self, name, nonce):
+        item = self.service.files().create(body={"name": name, "mimeType": DRIVE_FOLDER_MIME,
+            "appProperties": {"electridrive_qa_nonce": nonce}}, fields=_FILE_FIELDS).execute()
+        return RemoteFile.from_api(item)
 
     def find_file(self, name: str, parent_id: str) -> str | None:
         """Return an existing non-Workspace file with this exact parent/name.
@@ -246,20 +297,42 @@ class GoogleDriveClient:
             f"'{parent_id}' in parents",
             "trashed = false",
         ]
-        response = self.service.files().list(
-            q=" and ".join(query),
-            spaces="drive",
-            fields="files(id, mimeType)",
-            pageSize=100,
-            orderBy="createdTime",
-        ).execute()
-        for item in response.get("files", []):
-            mime = item.get("mimeType") or ""
-            if mime != DRIVE_FOLDER_MIME and not mime.startswith(
-                "application/vnd.google-apps."
-            ):
-                return item["id"]
-        return None
+        return self._unique_path_match(query, name, binary_only=True)
+
+    def _unique_path_match(
+        self, query: list[str], name: str, *, binary_only: bool
+    ) -> str | None:
+        """Resolve a name only after all pages establish one immutable ID.
+
+        The legacy upload engine and root-folder resolution must never choose
+        the first of several equally named objects. Workspace-only pages do
+        not establish that no binary match exists on a later page.
+        """
+        ids: set[str] = set()
+        page = None
+        seen: set[str] = set()
+        while True:
+            response = self.service.files().list(
+                q=" and ".join(query), spaces="drive",
+                fields="nextPageToken, files(id, mimeType)",
+                pageSize=100, pageToken=page,
+            ).execute()
+            for item in response.get("files", []):
+                mime = item.get("mimeType") or ""
+                if binary_only and mime.startswith("application/vnd.google-apps."):
+                    continue
+                ids.add(item["id"])
+                if len(ids) > 1:
+                    raise ValueError(
+                        f"Ambiguous Drive path {name!r}: multiple IDs; "
+                        "review the destination before syncing."
+                    )
+            page = response.get("nextPageToken")
+            if not page:
+                return next(iter(ids), None)
+            if page in seen:
+                raise RuntimeError("Drive lookup returned a repeated page token")
+            seen.add(page)
 
     def ensure_folder_path(self, remote_path: str) -> str:
         parts = [p.strip() for p in remote_path.replace("\\", "/").split("/") if p.strip()]
@@ -343,6 +416,22 @@ class GoogleDriveClient:
         remote_name: str,
         progress_cb: ProgressCB | None = None,
     ) -> str:
+        from electridrive.qa_policy import current_policy
+        policy = current_policy()
+        if policy:
+            from googleapiclient.http import MediaIoBaseUpload
+            with policy.source(local_file) as source:
+                total = os.fstat(source.fileno()).st_size
+                media = MediaIoBaseUpload(source, mimetype="application/octet-stream", resumable=True)
+                request = self.service.files().create(body={"name": remote_name, "parents": [parent_id]}, media_body=media, fields="id")
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status and progress_cb:
+                        progress_cb(int(status.resumable_progress), total)
+                if progress_cb:
+                    progress_cb(total, total)
+                return response["id"]
         try:
             from googleapiclient.http import MediaFileUpload
         except Exception as exc:  # pragma: no cover
@@ -352,7 +441,8 @@ class GoogleDriveClient:
 
         metadata = {"name": remote_name, "parents": [parent_id] if parent_id != "root" else []}
         total = local_file.stat().st_size
-        media = MediaFileUpload(str(local_file), resumable=True)
+        mime_type = mimetypes.guess_type(remote_name)[0] or "application/octet-stream"
+        media = MediaFileUpload(str(local_file), mimetype=mime_type, resumable=True)
         request = self.service.files().create(body=metadata, media_body=media, fields="id")
         response = None
         while response is None:
@@ -375,6 +465,22 @@ class GoogleDriveClient:
         Parents are deliberately omitted from the update metadata, so an update
         cannot accidentally move the canonical file to another folder.
         """
+        from electridrive.qa_policy import current_policy
+        policy = current_policy()
+        if policy:
+            from googleapiclient.http import MediaIoBaseUpload
+            with policy.source(local_file) as source:
+                total = os.fstat(source.fileno()).st_size
+                media = MediaIoBaseUpload(source, mimetype="application/octet-stream", resumable=True)
+                request = self.service.files().update(fileId=file_id, body={"name": remote_name} if remote_name is not None else {}, media_body=media, fields="id")
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status and progress_cb:
+                        progress_cb(int(status.resumable_progress), total)
+                if progress_cb:
+                    progress_cb(total, total)
+                return response["id"]
         try:
             from googleapiclient.http import MediaFileUpload
         except Exception as exc:  # pragma: no cover
@@ -385,7 +491,11 @@ class GoogleDriveClient:
         local_file = Path(local_file)
         metadata = {"name": remote_name} if remote_name is not None else {}
         total = local_file.stat().st_size
-        media = MediaFileUpload(str(local_file), resumable=True)
+        # Descriptor paths have no extension. Retain the existing object's MIME
+        # rather than accidentally converting images/docs to octet-stream.
+        mime_type = (self.get_metadata(file_id).mime_type if not local_file.suffix
+                     else mimetypes.guess_type(str(local_file))[0])
+        media = MediaFileUpload(str(local_file), mimetype=mime_type or "application/octet-stream", resumable=True)
         request = self.service.files().update(
             fileId=file_id,
             body=metadata,
@@ -412,15 +522,35 @@ class GoogleDriveClient:
             ) from exc
 
         dest_path = Path(dest_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        request = self.service.files().get_media(fileId=file_id)
+        from electridrive.qa_policy import current_policy
+        if not current_policy():
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+        files = self.service.files()
+        metadata = self.get_metadata(file_id) if callable(getattr(files, "get", None)) else None
+        request = files.get_media(fileId=file_id)
         with _atomic_download_file(dest_path) as handle:
-            downloader = MediaIoBaseDownload(handle, request)
+            digest = hashlib.md5()
+            written = 0
+            class VerifiedWriter:
+                def write(self, data):
+                    nonlocal written
+                    count = handle.write(data)
+                    digest.update(data[:count])
+                    written += count
+                    return count
+                def __getattr__(self, name):
+                    return getattr(handle, name)
+            downloader = MediaIoBaseDownload(VerifiedWriter(), request)
             done = False
             while not done:
                 status, done = downloader.next_chunk()
                 if status and progress_cb:
                     progress_cb(int(status.resumable_progress), int(status.total_size or 0))
+            if metadata is not None and (
+                (metadata.size is not None and written != metadata.size)
+                or (metadata.md5_checksum and digest.hexdigest() != metadata.md5_checksum)
+            ):
+                raise ValueError("Downloaded content failed integrity check")
         return dest_path
 
     def export_file(
@@ -442,7 +572,9 @@ class GoogleDriveClient:
             meta = self.get_metadata(file_id)
             mime_type, _ext = export_format_for(meta.mime_type)
         dest_path = Path(dest_path)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        from electridrive.qa_policy import current_policy
+        if not current_policy():
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
         request = self.service.files().export_media(fileId=file_id, mimeType=mime_type)
         with _atomic_download_file(dest_path) as handle:
             downloader = MediaIoBaseDownload(handle, request)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import logging
 
 from PySide6.QtCore import QTimer, Qt
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from electridrive.config import APP_TAGLINE
+from electridrive.build_channel import window_title
 from electridrive.ui import icons
 from electridrive.ui.session import DriveSession
 from electridrive.ui.theme import build_qss, get_palette
@@ -54,7 +57,7 @@ class MainWindow(QMainWindow):
         self.views: dict[str, QWidget] = {}
         self.nav_buttons: dict[str, NavButton] = {}
 
-        self.setWindowTitle("ElectriDrive")
+        self.setWindowTitle(window_title() + (" — QA MODE" if qa.current_policy() else ""))
         self.setMinimumSize(1040, 680)
         self.setWindowIcon(icons.icon("bolt", self.palette_.accent, 64))
 
@@ -166,6 +169,14 @@ class MainWindow(QMainWindow):
         self.account_btn.clicked.connect(lambda: self.switch_view("settings"))
         h.addWidget(self.account_btn)
         outer.addWidget(header)
+        policy = qa.current_policy()
+        if policy:
+            banner = QLabel(f"QA MODE — synthetic data only: {policy.local_root} — deletion and FUSE disabled")
+            banner.setObjectName("QaSafetyBanner")
+            banner.setTextFormat(Qt.PlainText)
+            banner.setWordWrap(True)
+            banner.setStyleSheet("background: #713f12; color: #fef08a; padding: 10px; font-weight: bold;")
+            outer.addWidget(banner)
 
         content = QWidget()
         cv = QVBoxLayout(content)
@@ -286,8 +297,14 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
 
     def closeEvent(self, event):
-        self.session.shutdown()
-        super().closeEvent(event)
+        try:
+            self.session.shutdown()
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Could not close", str(exc))
+            event.ignore()
+            return
+        event.accept()
 
 
 def run_app() -> int:

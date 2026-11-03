@@ -8,8 +8,16 @@ credentials.json
 token.json
 app_client.json
 electridrive/google_api/client_baked.json
+electridrive/build_channel.txt
 license_signing_key.pem
 *private*key*.pem
 dist/
 build/
 *.egg-info/
+# Private QA capabilities and persisted profile data
+.electridrive-qa.json
+.electridrive-qa-remotes.json
+qa-mode.json
+qa-sync-state.json
+qa-sync-state.lock
+**/config/electridrive/

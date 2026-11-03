@@ -10,6 +10,7 @@ from server import license_server as server
 
 @pytest.fixture
 def processed(tmp_path, monkeypatch):
+    monkeypatch.delenv("DELIVERY_DB", raising=False)
     path = tmp_path / "processed.txt"
     monkeypatch.setenv("PROCESSED_FILE", str(path))
     server.mark_processed("VALIDTXN01")

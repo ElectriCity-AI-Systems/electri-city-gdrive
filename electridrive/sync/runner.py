@@ -1,12 +1,15 @@
 """Sequential runner for every enabled user-configured sync pair."""
 from __future__ import annotations
 
+from electridrive import qa_policy as qa
+
 import logging
 from dataclasses import dataclass, field
 from typing import Iterable
 
 from electridrive.config import SyncPair
 from electridrive.sync.rules import SyncRules
+from electridrive.sync.safety import SyncCancelled, check_cancelled
 from electridrive.sync.twoway import SyncReport, TwoWaySyncEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -35,11 +38,18 @@ def run_configured_pairs(
     *,
     rules: SyncRules | None = None,
     log_cb=None,
+    cancel_event=None,
 ) -> ConfiguredSyncReport:
     """Run all enabled pairs, continuing after every pair-level failure."""
+    check_cancelled(cancel_event)
+    qa.check_startup()
     configured = list(pairs)
+    for pair in configured:
+        qa.validate_pair(pair)
+    client = qa.restrict_client(client)
     aggregate = ConfiguredSyncReport(configured_pairs=len(configured))
     for index, pair in enumerate(configured, start=1):
+        check_cancelled(cancel_event)
         if not pair.enabled:
             continue
         aggregate.enabled_pairs += 1
@@ -53,14 +63,17 @@ def run_configured_pairs(
                 LOGGER.warning("Configured sync log callback failed", exc_info=True)
         try:
             report = TwoWaySyncEngine(
-                client, db, pair, rules=rules, log_cb=log_cb
+                client, db, pair, rules=rules, log_cb=log_cb, cancel_event=cancel_event
             ).run()
+        except SyncCancelled:
+            raise
         except Exception as exc:
             # Pair isolation is a correctness requirement: a broken selected
             # root must never prevent later configured roots from running.
             LOGGER.exception("Configured sync pair failed: %s", pair.local_path)
             report = SyncReport(failed=1, errors=[f"pair execution failed: {exc}"])
 
+        check_cancelled(cancel_event)
         aggregate.outcomes.append(PairOutcome(pair, report))
         if report.failed or report.unexplained_omissions:
             aggregate.failed_pairs += 1

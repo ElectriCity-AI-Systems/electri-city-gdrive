@@ -34,6 +34,8 @@ SMTP_USER=<SMTP login>
 SMTP_PASS=<SMTP password>
 # MAIL_FROM is optional; if omitted, SMTP_USER is used.
 PROCESSED_FILE=/var/lib/electridrive-license/processed.txt
+# Optional; defaults to deliveries.sqlite beside PROCESSED_FILE
+DELIVERY_DB=/var/lib/electridrive-license/deliveries.sqlite
 ```
 
 This is a systemd environment file, not a shell script. Do not `source` it. Keep actual
@@ -55,7 +57,10 @@ updating and retesting the exact-match configuration before rollout.
 
 The production service uses two Gunicorn workers and binds only to
 `127.0.0.1:8012`. Its durable transaction state is
-`/var/lib/electridrive-license/processed.txt`.
+`/var/lib/electridrive-license/deliveries.sqlite`, with the retained
+`/var/lib/electridrive-license/processed.txt` acceptance mirror. All workers and
+the retry timer must use the same local persistent paths; do not use network
+filesystems or per-container ephemeral storage for these files.
 
 ## 3. Product binding (must be validated before production deploy)
 
@@ -164,10 +169,11 @@ confirm the email arrives and the key activates in the app. Then switch to `live
 - Idempotent: each PayPal `txn_id` is serialized across workers and persisted once.
 - Duplicate, unverified, fake, and ungrantable IPNs return HTTP 200.
 - After PayPal verification, transient signing, SMTP, or persistence failures return HTTP 500
-  so PayPal can retry. A transaction is persisted only after SMTP accepts its message.
-- A verified, otherwise grantable IPN also returns HTTP 500 when
-  `PAYPAL_RECEIVER_EMAIL` is missing, preventing licenses for an arbitrary receiver while
-  retaining PayPal's retry opportunity.
+  so PayPal can retry. A verified receipt is durably queued before SMTP; it counts
+  as processed only after SMTP acceptance. Uncertain attempts are quarantined.
+- Missing or whitespace-only `PAYPAL_RECEIVER_EMAIL` fails application startup;
+  configure the merchant before starting Gunicorn. Product binding remains a
+  runtime fail-closed HTTP 503 check.
 - Payer addresses and generated license keys are not written to application logs.
 - Modern alternative: PayPal REST **Webhooks** (signature-verified). IPN is used here because
   it works directly with hosted *donate* buttons with the least setup.
@@ -230,3 +236,82 @@ service environment, private key path and processed ledger. Do not copy the
 private key into git, CI artifacts or the deployment bundle. Use the CI-proven
 commit, verify `/health`, and retain an immediate rollback to the previously
 running release. Never use a forged paid IPN as a production test.
+
+
+## 8. Durable delivery queue, migration and rollback
+
+The database stores only the delivery identity, validated payment/product fields,
+signed license, Message-ID and delivery state needed for retry. It does not store
+a raw IPN. Names, addresses, signed licenses, the SQLite journal and backups are
+sensitive: keep the directory service-owned mode 0700, state files mode 0600 and
+backups protected. Logs and failure rows contain error types, never raw provider
+messages or payer details. Back up the database and legacy acceptance mirror
+together, using a stopped service or SQLite's backup API; never copy a live
+SQLite file alone while a transaction/journal is active.
+
+The queue states are `pending`, `retry`, `sending`, and `sent`. A unique receipt
+cannot be replaced by a duplicate IPN. Each automatic attempt durably claims
+`sending` before SMTP, and reuses its saved signed key and Message-ID on definite
+failure retries. Explicit SMTP rejection, signing, connection and TLS failures
+are retryable. An interrupted process or lost connection during SMTP DATA can
+have accepted the mail: those attempts stay `sending` and are never retried
+or aged back to pending automatically. Failure after SMTP acceptance while
+writing the legacy mirror or final database state has the same quarantine.
+A failed QUIT after accepted DATA does not undo acceptance.
+
+No email is sent by startup, `/health`, or queue initialization. After the
+normal owner deployment approval and backups described above, upgrade in this
+order:
+
+1. Stop **all** old Gunicorn workers and any retry service/timer. Never run old
+   ledger-only workers alongside queue-aware workers.
+2. Retain `processed.txt` at its configured path. Under the same advisory lock,
+   initialize the database and import valid legacy transaction IDs as `sent`:
+
+   ```bash
+   cd /opt/electridrive-license/app
+   sudo -u electridrive-license /opt/electridrive-license/.venv/bin/python -m server.license_retry --env-file /etc/electridrive-license.env --initialize
+   ```
+
+   Initialization is repeatable and sends nothing. An unreadable ledger or
+   database error aborts the operation. Never truncate or rename the ledger.
+3. Start only the updated web workers. Install the repository's
+   `systemd/electridrive-license-retry.service` and `.timer` through the same
+   approved deployment procedure; the timer is opt-in and retries every five
+   minutes. It uses the existing service user, environment, state directory
+   and hardening. No unit is installed or enabled by this source change.
+4. Check `/health` and private service logs. Manually running
+   `python -m server.license_retry --env-file /etc/electridrive-license.env` as
+   the service user retries only `pending`/`retry` receipts. Duplicate IPNs use
+   the immutable saved receipt and cannot reclaim a `sending` attempt.
+
+Every new accepted delivery still appends and fsyncs `processed.txt`, which
+allows the older release to deduplicate accepted payments after rollback.
+**Do not roll back while any `pending`, `retry`, or `sending` row remains
+unresolved:** the older handler cannot interpret these states and could replay
+an uncertain transaction. Stop workers/timer before rollback and preserve both
+state files and protected backups, alongside the exact prior application and
+environment. Do not regenerate signing keys.
+
+### Reconciling an uncertain automatic attempt
+
+Stop the web workers and retry timer/service first. Keep a protected backup and
+hold the existing processing lock during any local database maintenance. Use
+the stored transaction ID and Message-ID to independently check SMTP/provider
+acceptance records and the original verified PayPal payment; never infer
+nonacceptance merely from an empty inbox or elapsed time. If acceptance cannot
+be established either way, leave `sending` quarantined.
+
+An owner performing local database maintenance may mark a proven accepted
+attempt `sent` **only after** appending/fsyncing its valid transaction ID to the
+retained acceptance mirror. An attempt may be moved from `sending` to `retry`
+only after independent evidence proves that SMTP did not accept it. Preserve
+the saved key and Message-ID, keep a private operator record, and restart only
+queue-aware workers after reconciliation. There is deliberately no public
+recovery endpoint or automatic reset of uncertain rows.
+
+The separate owner-only `server.license_recovery --resend` interface continues
+to accept only proven prior SMTP acceptance from either the retained ledger or
+a database `sent` row. It refuses queued/uncertain/unrecognized receipts,
+verifies the current public key, and retains the interactive payment/payer
+cross-check and literal `RESEND`. This manual resend does not change the ledger.

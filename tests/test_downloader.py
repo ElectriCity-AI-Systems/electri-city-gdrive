@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from electridrive.sync.downloader import plan_download, sanitize_name
 from fakes import FakeDrive
 
@@ -38,3 +40,21 @@ def test_plan_download_google_doc_marks_export(tmp_path: Path):
     assert item.export_mime == (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
+
+
+def test_manual_download_rejects_pagination_cycle(tmp_path: Path):
+    from electridrive.google_api.client import FileListing
+
+    class CyclingDrive(FakeDrive):
+        calls = 0
+
+        def list_folder(self, parent_id="root", page_token=None):
+            self.calls += 1
+            if self.calls > 3:
+                raise RuntimeError("test watchdog: infinite pagination")
+            return FileListing([], "again")
+
+    fake = CyclingDrive()
+    folder = fake.add_folder("QA")
+    with pytest.raises(RuntimeError, match="repeated page token"):
+        plan_download(fake, fake.get_metadata(folder), tmp_path)

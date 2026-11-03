@@ -2,6 +2,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 import license_server as ls  # noqa: E402
 
@@ -77,6 +79,7 @@ def _completed_ipn(txn_id="TESTTXN001"):
 
 
 def _client(monkeypatch, tmp_path, receiver="merchant@example.com"):
+    monkeypatch.delenv("DELIVERY_DB", raising=False)
     monkeypatch.setenv("PROCESSED_FILE", str(tmp_path / "processed.txt"))
     monkeypatch.setenv("MIN_AMOUNT", "0")
     monkeypatch.setenv("PAYPAL_CURRENCY", "EUR")
@@ -182,10 +185,10 @@ def test_ipn_persistence_failure_returns_500_after_email(tmp_path, monkeypatch):
 
 def test_ipn_missing_receiver_configuration_returns_500_without_email(
         tmp_path, monkeypatch):
-    client = _client(monkeypatch, tmp_path, receiver=None)
     monkeypatch.setattr(ls, "issue_key", lambda *args: (_ for _ in ()).throw(
         AssertionError("must not issue")))
-    assert client.post("/paypal/ipn", data=_completed_ipn()).status_code == 500
+    with pytest.raises(ValueError, match="PAYPAL_RECEIVER_EMAIL"):
+        _client(monkeypatch, tmp_path, receiver=None)
 
 
 def test_ipn_missing_or_unsafe_transaction_id_returns_200(tmp_path, monkeypatch):

@@ -169,8 +169,10 @@ def test_upload_only_syncs_exact_recursive_tree_empty_folders_and_reuses_ids(
     try:
         # This fixture specifically checks legacy filtered mode. Full backup
         # defaults are verified separately by tests/test_full_backup_default.py.
+        # root.txt pre-exists untracked; reusing it requires explicit review.
         engine = UploadOnlySyncEngine(drive_client=fake, database=db,
-                                      rules=SyncRules())
+                                      rules=SyncRules(),
+                                      confirmed_remote_ids={"root.txt": existing_file})
         first = engine.sync_up(root, "ElectriDrive/Complete Upload")
 
         assert first.scanned == len(FILES)
@@ -397,7 +399,9 @@ def test_one_way_modes_keep_the_configured_side_authoritative(tmp_path: Path) ->
             fake,
             db,
             SyncPair(
-                str(upload_root), "ElectriDrive/Upload Authority", direction="up_only"
+                str(upload_root), "ElectriDrive/Upload Authority", direction="up_only",
+                # same.txt pre-exists untracked; reusing it requires explicit review.
+                canonical_remote_ids={"same.txt": upload_id},
             ),
         )
         assert up.run().failed == 0

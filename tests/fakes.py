@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import os
+import uuid
 from pathlib import Path
 
 from electridrive.google_api.client import (
@@ -22,6 +24,7 @@ class FakeDrive:
     """Models a small Drive tree. Satisfies the parts of DriveClientProtocol used in tests."""
 
     def __init__(self):
+        self.account_key = 'fake:' + uuid.uuid4().hex
         self._ids = itertools.count(1)
         self.nodes: dict[str, dict] = {
             "root": {"id": "root", "name": "My Drive", "mime": DRIVE_FOLDER_MIME,
@@ -143,7 +146,7 @@ class FakeDrive:
         if remote_name is not None:
             node["name"] = remote_name
         node["modified"] = "2024-01-02T00:00:00Z"
-        self.updates.append((file_id, str(local_file), remote_name))
+        self.updates.append((file_id, os.readlink(local_file) if str(local_file).startswith("/proc/self/fd/") else str(local_file), remote_name))
         self._record_change(file_id)
         if progress_cb:
             progress_cb(len(data), len(data))

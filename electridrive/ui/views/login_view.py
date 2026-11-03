@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from electridrive import qa_policy as qa
 from electridrive.config import APP_TAGLINE
 from electridrive.ui import icons
 from electridrive.ui.theme import Palette
@@ -64,7 +65,15 @@ class LoginView(QWidget):
         # Feature grid
         grid = QVBoxLayout()
         grid.setSpacing(10)
-        for icon_name, t, d in _FEATURES:
+        features = _FEATURES
+        if qa.current_policy():
+            features = [
+                ("drive", "QA cloud roots", "Use only explicitly registered synthetic cloud folders."),
+                ("transfers", "Synthetic transfers", "Upload and download within your approved QA data directory."),
+                ("sync", "QA sync", "Test sync with deletion disabled and isolated per-file access."),
+                ("server", "QA boundaries", "Drive Picker and Virtual Drive / FUSE are disabled."),
+            ]
+        for icon_name, t, d in features:
             grid.addWidget(self._feature(icon_name, t, d))
         card.v.addLayout(grid)
 
@@ -120,10 +129,17 @@ class LoginView(QWidget):
         else:
             cfg = self._session.paths.config_dir
             self.status.setText(
-                "First-time setup: add a Google OAuth Desktop client (Drive API + Picker "
-                "API enabled). Set ELECTRIDRIVE_CLIENT_ID, or drop client JSON at "
-                f"{cfg / 'app_client.json'} (or your own credentials.json)."
+                "Google Drive connection is unavailable because this build has no valid "
+                "publisher-configured OAuth Desktop client. Contact the publisher for a "
+                "customer candidate. For self-built copies, add a client JSON at "
+                f"{cfg / 'app_client.json'}."
             )
+            if qa.current_policy():
+                self.status.setText(
+                    "QA setup: add a Google OAuth Desktop client with Drive API enabled "
+                    "to this isolated profile only: "
+                    f"{cfg / 'app_client.json'} (or {cfg / 'credentials.json'}). "
+                    "QA uses per-file access. Environment client overrides are ignored.")
             self.status.setStyleSheet(f"color: {self._p.warning};")
             self.connect_btn.setEnabled(False)
 
