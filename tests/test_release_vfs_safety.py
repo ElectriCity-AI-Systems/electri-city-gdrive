@@ -88,8 +88,8 @@ def test_fuse_mount_namespaces_cache_by_account(tmp_path, monkeypatch):
     class Binding:
         def __init__(self, tree, writable=False):
             roots.append(tree.cache_dir)
-    monkeypatch.setattr(module, 'fuse_available', lambda: True)
-    monkeypatch.setattr(module, 'create_operations_class', lambda: Binding)
+    monkeypatch.setattr(fuse_mount, 'fuse_available', lambda: True)
+    monkeypatch.setattr(fuse_mount, 'create_operations_class', lambda: Binding)
     monkeypatch.setitem(sys.modules, 'fuse', SimpleNamespace(FUSE=lambda *a, **kw: None))
     for identity in ('account-one', 'account-two'):
         drive = FakeDrive()
@@ -106,8 +106,8 @@ def test_immediate_fuse_failure_is_reported_to_start_and_wait(tmp_path, monkeypa
     from types import SimpleNamespace
     def fail(*args, **kwargs):
         raise RuntimeError('mount permission denied')
-    monkeypatch.setattr(module, 'fuse_available', lambda: True)
-    monkeypatch.setattr(module, 'create_operations_class', lambda: lambda *a: object())
+    monkeypatch.setattr(fuse_mount, 'fuse_available', lambda: True)
+    monkeypatch.setattr(fuse_mount, 'create_operations_class', lambda: lambda *a: object())
     monkeypatch.setitem(sys.modules, 'fuse', SimpleNamespace(FUSE=fail))
     mount = fuse_mount.FuseMount(FakeDrive(), tmp_path / 'cache')
     with pytest.raises(RuntimeError, match='mount permission denied'):
@@ -127,8 +127,8 @@ def test_fuse_qa_safety_error_keeps_wrapped_runtime_error_contract(
     def fail(*args, **kwargs):
         raise qa.QaSafetyError('QA safety stop: FUSE is disabled')
 
-    monkeypatch.setattr(module, 'fuse_available', lambda: True)
-    monkeypatch.setattr(module, 'create_operations_class', lambda: lambda *a: object())
+    monkeypatch.setattr(fuse_mount, 'fuse_available', lambda: True)
+    monkeypatch.setattr(fuse_mount, 'create_operations_class', lambda: lambda *a: object())
     monkeypatch.setitem(sys.modules, 'fuse', SimpleNamespace(FUSE=fail))
     mount = fuse_mount.FuseMount(FakeDrive(), tmp_path / 'cache')
 
