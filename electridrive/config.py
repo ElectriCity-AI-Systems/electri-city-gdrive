@@ -189,7 +189,7 @@ def load_settings() -> Settings:
             raise
         except Exception as exc:  # corrupt settings should never crash the app
             if qa.current_policy():
-                raise qa.QaSafetyError("QA safety stop: malformed isolated settings") from exc
+                raise qa.QaSafetyError("QA safety stop: malformed isolated settings") from None
             LOGGER.warning("Could not read settings, using defaults: %s", exc)
             return Settings()
 

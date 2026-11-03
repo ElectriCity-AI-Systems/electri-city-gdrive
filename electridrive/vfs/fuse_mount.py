@@ -394,12 +394,14 @@ class FuseMount:
                 FUSE(fs_cls(tree), str(mp), foreground=True, nothreads=True, ro=True)
             except Exception as exc:
                 self._error = exc
-                LOGGER.exception("FUSE mount exited with error")
+                qa.log_exception(LOGGER, "FUSE mount exited with error")
 
         self._thread = threading.Thread(target=run, name="electridrive-fuse", daemon=True)
         self._thread.start()
         self._thread.join(timeout=0.05)
         if self._error is not None:
+            if isinstance(self._error, qa.QaSafetyError):
+                raise self._error from None
             raise RuntimeError(str(self._error)) from self._error
 
     def wait(self):
@@ -407,6 +409,8 @@ class FuseMount:
         if self._thread:
             self._thread.join()
         if self._error is not None:
+            if isinstance(self._error, qa.QaSafetyError):
+                raise self._error from None
             raise RuntimeError(str(self._error)) from self._error
 
     def stop(self):
