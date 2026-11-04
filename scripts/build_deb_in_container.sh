@@ -40,10 +40,14 @@ docker run --rm \
     mkdir -p "$HOME"
     bash scripts/build_deb.sh
     version="$($PY -c "from electridrive.config import APP_VERSION; print(APP_VERSION)")"
-    cp "dist/deb/electridrive_${version}_amd64.deb" "dist/electridrive_${version}_amd64.deb"
-    (cd dist && sha256sum "electridrive_${version}_amd64.deb" > SHA256SUMS.txt)
+    name="electridrive_${version}_amd64"
+    if [ "$ELECTRIDRIVE_BUILD_CHANNEL" = "CI-QA" ]; then
+      name="electridrive-CI-QA_${version}_amd64"
+    fi
+    cp "dist/deb/${name}.deb" "dist/${name}.deb"
+    (cd dist && sha256sum "${name}.deb" > SHA256SUMS.txt)
   '
 
 echo "Built package artifacts:"
-ls -l dist/electridrive_*_amd64.deb dist/SHA256SUMS.txt
+ls -l dist/electridrive*_amd64.deb dist/SHA256SUMS.txt
 cat dist/SHA256SUMS.txt
