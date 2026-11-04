@@ -741,6 +741,9 @@ def test_full_backup_upload_only_includes_hidden_credentials_build_and_temp_file
         ".git/config": b"test-git-config",
         ".venv/bin/python": b"test-venv-file",
         "node_modules/lib/index.js": b"test-js",
+        "Unicode äöü/雪 file.txt": b"unicode-file",
+        "zero-byte.bin": b"",
+        "large.bin": b"x" * (1024 * 1024),
         "secret.tmp": b"test-temporary-file",
         ".electridrive-trash/old.bak~": b"test-trash-copy",
         ".hidden/credentials.json": b"test-oauth-placeholder",
@@ -750,6 +753,7 @@ def test_full_backup_upload_only_includes_hidden_credentials_build_and_temp_file
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+    (root / "empty directory" / "nested empty").mkdir(parents=True)
     fake = FakeDrive()
     db = SyncDatabase(tmp_path / "state.sqlite3")
     pair = SyncPair(
@@ -758,10 +762,22 @@ def test_full_backup_upload_only_includes_hidden_credentials_build_and_temp_file
     )
     try:
         assert pair.include_all_files
-        result = TwoWaySyncEngine(fake, db, pair).run()
+        engine = TwoWaySyncEngine(fake, db, pair)
+        result = engine.run()
         assert result.failed == result.unexplained_omissions == 0
         assert result.excluded_local == 0
         assert result.uploaded == len(contents)
+        uploaded_contents = {
+            remote_name: fake.nodes[file_id]["content"]
+            for _local_path, _parent_id, remote_name, file_id in fake.uploads
+        }
+        assert uploaded_contents == {
+            Path(path).name: data for path, data in contents.items()
+        }
+        remote_root = fake.ensure_folder_path("ElectriDrive/Test-Complete-Backup")
+        empty_directory = fake.find_folder("empty directory", remote_root)
+        assert empty_directory is not None
+        assert fake.find_folder("nested empty", empty_directory) is not None
         remote_names = {
             n["name"]
             for n in fake.nodes.values()
@@ -770,6 +786,14 @@ def test_full_backup_upload_only_includes_hidden_credentials_build_and_temp_file
         }
         assert remote_names == {Path(p).name for p in contents}
         assert all(not n["trashed"] for n in fake.nodes.values())
+
+        upload_count = len(fake.uploads)
+        update_count = len(fake.updates)
+        unchanged = engine.run()
+        assert unchanged.failed == unchanged.unexplained_omissions == 0
+        assert unchanged.uploaded == 0
+        assert len(fake.uploads) == upload_count
+        assert len(fake.updates) == update_count
     finally:
         db.close()
 
@@ -780,15 +804,35 @@ def test_full_backup_rejects_unsupported_symlink_without_drive_mutation(
     root = tmp_path / "selected-root"
     root.mkdir()
     (root / "regular.txt").write_bytes(b"safe")
-    (root / "alias").symlink_to(root / "regular.txt")
+    (root / "internal-relative").symlink_to(Path("regular.txt"))
+    outside = tmp_path / "outside-python"
+    outside.write_bytes(b"must remain outside the selected root")
+    (root / "external-absolute").symlink_to(outside)
+    venv_python = root / ".venv/bin/python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(outside)
+    (root / "dangling-relative").symlink_to(Path("missing"))
+    (root / "cycle-a").symlink_to(Path("cycle-b"), target_is_directory=True)
+    (root / "cycle-b").symlink_to(Path("cycle-a"), target_is_directory=True)
     fake = FakeDrive()
     db = SyncDatabase(tmp_path / "state.sqlite3")
     pair = SyncPair(str(root), "ElectriDrive/Test-No-Silent-Skips",
                     direction="up_only", delete_policy="off")
     try:
         report = TwoWaySyncEngine(fake, db, pair).run()
-        assert report.failed == 1
-        assert any("unsupported symlink" in err for err in report.errors)
+        assert report.failed >= 1
+        assert all(
+            any(f"release blocker: unsupported symlink {path}" in err
+                for err in report.errors)
+            for path in (
+                "internal-relative",
+                "external-absolute",
+                ".venv/bin/python",
+                "dangling-relative",
+                "cycle-a",
+                "cycle-b",
+            )
+        )
         assert not fake.uploads and not fake.updates
         assert len(fake.nodes) == 1  # no remote folder creation
     finally:

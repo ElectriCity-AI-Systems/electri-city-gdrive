@@ -70,7 +70,8 @@ def scan_local_tree(root: Path, rules: SyncRules | None = None) -> LocalTree:
                         if entry.is_symlink():
                             if rules.fail_on_unsupported:
                                 errors.append(
-                                    f"unsupported symlink {rel}: full backup cannot preserve "
+                                    f"release blocker: unsupported symlink {rel}: "
+                                    "full backup cannot preserve "
                                     "a symlink without changing its meaning"
                                 )
                             else:

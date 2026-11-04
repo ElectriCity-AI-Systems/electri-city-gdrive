@@ -61,8 +61,16 @@ def _package(
     if install_target:
         executable = root / "opt/electridrive/electridrive"
         executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        executable.chmod(0o755)
         os.symlink("/opt/electridrive/electridrive", root / "usr/bin/electridrive")
+
+    # dpkg-deb requires accessible package directories, regardless of the
+    # caller's umask. Keep fixture modes representative of a normal package.
+    for path in (root, *root.rglob("*")):
+        if path.is_symlink():
+            continue
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    if install_target:
+        executable.chmod(0o755)
 
     package = tmp_path / "fixture.deb"
     subprocess.run(

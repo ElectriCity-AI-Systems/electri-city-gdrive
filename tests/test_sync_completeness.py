@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -245,6 +246,79 @@ def test_download_only_syncs_exact_recursive_tree_and_remote_empty_folders(
         changed = engine.run()
         assert changed.downloaded == 1 and changed.failed == 0
         assert (local_root / rel).read_bytes() == b"remote changed"
+    finally:
+        db.close()
+
+
+def test_full_backup_restores_supported_files_and_empty_directories(tmp_path: Path):
+    source = tmp_path / "synthetic-backup"
+    contents = {
+        ".env": b"ARTIFICIAL_TOKEN_PLACEHOLDER",
+        ".git/config": b"synthetic-git-config",
+        ".venv/bin/python": b"synthetic-venv-file",
+        "node_modules/lib/index.js": b"synthetic-js",
+        "Unicode äöü/雪 file.txt": b"unicode",
+        "zero-byte.bin": b"",
+        "large.bin": b"x" * (1024 * 1024),
+    }
+    folders = {"empty directory", "empty directory/nested empty"}
+    for relative in folders:
+        (source / relative).mkdir(parents=True, exist_ok=True)
+    for relative, content in contents.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    fake = FakeDrive()
+    db = SyncDatabase(tmp_path / "roundtrip.sqlite3")
+    expected_folders = set(folders)
+    for relative in contents:
+        parent = Path(relative).parent
+        while parent != Path("."):
+            expected_folders.add(parent.as_posix())
+            parent = parent.parent
+    try:
+        upload = TwoWaySyncEngine(
+            fake,
+            db,
+            SyncPair(
+                str(source),
+                "ElectriDrive/Synthetic-Restore-Proof",
+                direction="up_only",
+                delete_policy="off",
+            ),
+        ).run()
+        assert upload.failed == upload.unexplained_omissions == 0
+        assert upload.uploaded == len(contents)
+        remote_root = fake.ensure_folder_path("ElectriDrive/Synthetic-Restore-Proof")
+        _assert_complete(
+            set(contents), expected_folders, _remote_manifest(fake, remote_root)
+        )
+
+        restored = tmp_path / "restored-synthetic-backup"
+        download = TwoWaySyncEngine(
+            fake,
+            db,
+            SyncPair(
+                str(restored),
+                "ElectriDrive/Synthetic-Restore-Proof",
+                direction="down_only",
+                delete_policy="off",
+            ),
+        ).run()
+        assert download.failed == download.unexplained_omissions == 0
+        assert download.downloaded == len(contents)
+        _assert_complete(set(contents), expected_folders, _local_manifest(restored))
+        restored_hashes = {
+            relative: hashlib.sha256((restored / relative).read_bytes()).hexdigest()
+            for relative in contents
+        }
+        source_hashes = {
+            relative: hashlib.sha256(content).hexdigest()
+            for relative, content in contents.items()
+        }
+        assert restored_hashes == source_hashes
+        assert all(not node["trashed"] for node in fake.nodes.values())
     finally:
         db.close()
 
