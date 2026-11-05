@@ -305,11 +305,10 @@ def test_customer_package_has_priority_over_bad_existing_install(
     package_client.write_text(json.dumps(_client()), encoding="utf-8")
     monkeypatch.setattr(app_client, "build_channel", lambda: "CUSTOMER-CANDIDATE")
     monkeypatch.setattr(app_client, "_PACKAGE_FILE", package_client)
-    monkeypatch.setattr(
-        app_client,
-        "get_paths",
-        lambda: type("Paths", (), {"credentials_file": config_dir / "credentials.json"})(),
-    )
+    class Paths:
+        credentials_file = config_dir / "credentials.json"
+
+    monkeypatch.setattr(app_client, "get_paths", Paths)
 
     assert app_client.client_id() == _client()["installed"]["client_id"]
     assert app_client.picker_api_key() == _client()["picker_api_key"]
