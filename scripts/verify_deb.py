@@ -17,6 +17,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from electridrive.build_gate import QA_MARKER_NAME  # noqa: E402
+from electridrive.google_api.release_config import validate_customer_config  # noqa: E402
+
 
 SEARCH_PATHS = (
     "usr/local/bin",
@@ -238,14 +244,15 @@ def _verify_baked_client(root: Path) -> tuple[list[str], list[str]]:
     clients = list(root.rglob("client_baked.json"))
     if not clients:
         return ["release package has no baked OAuth client configuration"], []
+    if len(clients) != 1:
+        return ["release package has multiple baked OAuth client configurations"], []
     try:
         data = json.loads(clients[0].read_text(encoding="utf-8"))
-        section = data.get("installed") or data.get("web") or data
-        client_id = section.get("client_id", "")
-    except (OSError, ValueError, AttributeError) as exc:
-        return [f"baked OAuth client configuration is invalid: {exc}"], []
-    if not client_id or "REPLACE_WITH_YOUR_" in str(client_id):
-        return ["release package has only a placeholder OAuth client"], []
+        validate_customer_config(data)
+    except (OSError, ValueError):
+        return ["release package has invalid publisher OAuth and Picker configuration"], []
+    if list(root.rglob(QA_MARKER_NAME)):
+        return ["customer release package contains a CI-QA marker"], []
     return [], ["baked OAuth client configuration is present (values not displayed)"]
 
 

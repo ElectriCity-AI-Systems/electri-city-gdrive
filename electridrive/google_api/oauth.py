@@ -208,7 +208,11 @@ def authenticate_interactive():
             "No OAuth client configured. Set ELECTRIDRIVE_CLIENT_ID or provide "
             f"a Desktop OAuth client at {paths.credentials_file}."
         )
-    flow = InstalledAppFlow.from_client_config(app_client.client_config(), scopes)
+    flow = InstalledAppFlow.from_client_config(
+        app_client.client_config(),
+        scopes,
+        autogenerate_code_verifier=True,
+    )
     # run_local_server uses a loopback redirect with PKCE (S256).
     creds = flow.run_local_server(port=0)
     validate_scopes(creds, scopes)

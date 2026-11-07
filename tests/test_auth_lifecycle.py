@@ -103,6 +103,21 @@ def test_new_login_rejects_broader_actual_grant(monkeypatch):
     assert not get_paths().token_fallback_file.exists()
 
 
+def test_new_login_explicitly_enables_pkce(monkeypatch):
+    monkeypatch.setattr(oauth, 'load_credentials', lambda: None)
+    observed = {}
+    new = Credentials('token', scopes=[DEFAULT_SCOPE])
+    def create_flow(*args, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(run_local_server=lambda **kw: new)
+    monkeypatch.setattr(InstalledAppFlow, 'from_client_config', create_flow)
+    monkeypatch.setattr(oauth, 'save_credentials', lambda creds: None)
+    monkeypatch.setenv('ELECTRIDRIVE_CLIENT_ID', 'example.apps.googleusercontent.com')
+
+    assert oauth.authenticate_interactive() is new
+    assert observed['autogenerate_code_verifier'] is True
+
+
 def test_fallback_wins_over_stale_keyring(monkeypatch):
     path = get_paths().token_fallback_file
     path.write_text(json.dumps({'token': 'new', 'refresh_token': 'refresh',

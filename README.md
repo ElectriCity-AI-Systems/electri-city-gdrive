@@ -300,36 +300,39 @@ python scripts/make_icon.py                           # regenerate the app icon
 
 ## Build for distribution
 
-Ship a self-contained build (bundled Python + PySide6) so users don't install anything.
-The OAuth client is **baked in** at build time, so end users just sign in.
+Official customer packages fail closed unless they embed a valid publisher Desktop
+OAuth client and Picker API key. The manual protected candidate workflow is
+`.github/workflows/customer-candidate.yml`; publisher setup, clean Ubuntu 26.04
+acceptance, SHA256 checks, rollback, and owner-only release actions are documented
+in [`packaging/customer-candidate.md`](packaging/customer-candidate.md). Do not
+put publisher JSON, OAuth tokens, or signing credentials in the repository.
+
+Normal CI packages are visibly named `QA-ONLY-NOT-FOR-DISTRIBUTION`, carry a
+machine-checked QA marker and source-commit provenance, and cannot pass the
+customer artifact or release-draft gates. The PyInstaller spec itself rejects
+builds without checked channel/provenance metadata, so setting an environment
+variable alone cannot bypass the customer OAuth gate.
+
+For a local, committed, clean customer candidate, provide a publisher-generated
+Desktop client JSON file outside the repository and run:
 
 ```bash
-# 1) bake your built-in client into the package (gitignored), from env:
-ELECTRIDRIVE_CLIENT_ID=... ELECTRIDRIVE_CLIENT_SECRET=... \
-ELECTRIDRIVE_PICKER_API_KEY=... python scripts/bake_client.py
-
-# 2a) AppImage (portable, runs on most distros):
-bash scripts/build_appimage.sh        # -> dist/ElectriDrive-x86_64.AppImage
-
-# 2b) .deb (installs into /opt, adds a menu launcher):
-bash scripts/build_deb.sh             # -> dist/deb/electridrive_<ver>_amd64.deb
-
-# Reproducible official .deb baseline (Docker, pinned Ubuntu 22.04 image/dependencies):
-bash scripts/build_deb_in_container.sh # -> dist/electridrive_<ver>_amd64.deb + SHA256SUMS.txt
+ELECTRIDRIVE_APP_CLIENT_FILE=/absolute/path/publisher-client.json \
+  ELECTRIDRIVE_BUILD_CHANNEL=CUSTOMER-CANDIDATE \
+  bash scripts/build_release.sh
 ```
 
-Both scripts auto-bake the client if `ELECTRIDRIVE_CLIENT_ID` is set when you run them.
-Official amd64 packages are built with the pinned release dependencies on Ubuntu 22.04
-(GLIBC 2.35), then checked so newer build hosts cannot silently raise that baseline.
-The container builds pinned Python 3.12.15 from the checksum-verified official
+Official amd64 packages use pinned release dependencies on Ubuntu 22.04
+(GLIBC 2.35), then verify the exact artifacts, provenance and checksums. The
+container builds pinned Python 3.12.15 from the checksum-verified official
 source archive on that same baseline. `electridrive --doctor` reports the bundled
-Python version; package verification rejects runtimes older than Python 3.11.
-The PyInstaller spec is `packaging/electridrive.spec`. Virtual Drive uses `fusepy`,
+Python version and publisher OAuth/Picker configuration status; package verification rejects runtimes older than Python 3.11.
+Virtual Drive uses `fusepy`,
 which needs the **FUSE 2** library (`libfuse2t64` on Ubuntu 24.04/26.04 or `libfuse2`
 on Ubuntu 22.04), plus a mount helper from `fuse3` or `fuse`. The Debian package
 declares both. FUSE 3's library alone does not satisfy `fusepy`.
-New builds support `electridrive --doctor` to check the packaged FUSE binding
-without opening the GUI or signing in; a real mount also requires `/dev/fuse`.
+The doctor check does not perform Google sign-in or a Drive operation; a real
+mount also requires `/dev/fuse`.
 Linux packages also use the host GLib/GIO runtime (`libglib2.0-0t64` or
 `libglib2.0-0`) and its dependencies, so desktop modules from newer distributions
 can load their matching system libraries. Package verification rejects bundled

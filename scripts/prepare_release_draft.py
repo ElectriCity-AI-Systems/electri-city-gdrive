@@ -116,20 +116,21 @@ def validate_assets(directory, assets, version=None):
             raise ValueError(f'Candidate asset changed: {name}')
 
 
-def verify_candidate(directory, version):
+def verify_candidate(directory, version, revision):
     package=Path(directory)/f'electridrive_{version}_amd64.deb'
     command('python3','scripts/verify_deb.py',str(package),'--expected-version',version,
             '--max-glibc','2.35','--require-baked-client')
     for path in (package,Path(directory)/'ElectriDrive-x86_64.AppImage'):
         command('python3','scripts/verify_customer_artifact.py',str(path),
-                '--expected-channel','CUSTOMER-CANDIDATE','--max-glibc','2.35')
+                '--expected-channel','CUSTOMER-CANDIDATE','--max-glibc','2.35',
+                '--expected-revision',revision)
 
 
 def record_candidate(path, before):
     after=source_snapshot()
     if after != before: raise ValueError('Source changed during the candidate build')
     directory=path.parent
-    verify_candidate(directory,after['version'])
+    verify_candidate(directory,after['version'],after['commit'])
     names=['ElectriDrive-x86_64.AppImage',f"electridrive_{after['version']}_amd64.deb",'SHA256SUMS.txt']
     assets=[{'name':name,'sha256':digest(directory/name),'size':(directory/name).stat().st_size} for name in names]
     validate_assets(directory,assets,version=after['version'])
@@ -172,7 +173,8 @@ def main(argv=None):
     if manifest.get('channel')!='CUSTOMER-CANDIDATE' or manifest.get('max_glibc')!='2.35':
         raise ValueError('Only verified customer candidates may be staged')
     directory=args.manifest.parent
-    validate_assets(directory,manifest['assets'],version=current['version']);verify_candidate(directory,current['version'])
+    validate_assets(directory,manifest['assets'],version=current['version'])
+    verify_candidate(directory,current['version'],current['commit'])
     validate_ci(api(f'actions/runs/{args.ci_run}'),api(f'actions/runs/{args.ci_run}/jobs?per_page=100')['jobs'],current['commit'])
     latest=api('releases/latest')['tag_name'].removeprefix('v')
     if tuple(map(int,current['version'].split('.'))) <= tuple(map(int,latest.split('.'))):

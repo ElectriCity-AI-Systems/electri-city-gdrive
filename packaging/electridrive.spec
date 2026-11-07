@@ -1,10 +1,24 @@
 # PyInstaller spec for ElectriDrive (GUI).
 # Build from the repo root: pyinstaller --noconfirm packaging/electridrive.spec
 import os
+import sys
 from fnmatch import fnmatch
-from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+sys.path.insert(0, ROOT)
+
+from electridrive.build_gate import validate_build_inputs
+
+_gate_errors = validate_build_inputs(
+    Path(ROOT) / "electridrive",
+    expected_revision=os.environ.get("GITHUB_SHA"),
+    check_source_checkout=True,
+)
+if _gate_errors:
+    raise SystemExit("PyInstaller release gate rejected this build: " + "; ".join(_gate_errors))
+
+from PyInstaller.utils.hooks import collect_all
 
 datas = [(os.path.join(ROOT, "assets", "electridrive.png"), "assets")]
 binaries = []
@@ -24,8 +38,12 @@ if os.path.exists(baked):
     datas += [(baked, "electridrive/google_api")]
 
 channel = os.path.join(ROOT, "electridrive", "build_channel.txt")
-if os.path.exists(channel):
-    datas += [(channel, "electridrive")]
+datas += [(channel, "electridrive")]
+provenance = os.path.join(ROOT, "electridrive", "build_provenance.json")
+datas += [(provenance, "electridrive")]
+qa_marker = os.path.join(ROOT, "electridrive", "QA-NOT-FOR-DISTRIBUTION.txt")
+if os.path.exists(qa_marker):
+    datas += [(qa_marker, "electridrive")]
 
 a = Analysis(
     [os.path.join(ROOT, "app.py")],
