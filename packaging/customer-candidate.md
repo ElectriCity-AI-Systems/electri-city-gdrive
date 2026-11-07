@@ -68,7 +68,11 @@ non-prerelease releases. Recommend a distinct `v2.2.2` candidate after owner
 approval and compatibility review. The current source and candidate workflow
 still name version `2.2.1`; do not dispatch a new candidate or reuse that version
 until an approved version update is made. The public release/tag is not to be
-moved or overwritten.
+moved or overwritten. The release-draft helper also refuses an already existing
+tag or release, so it cannot create a fresh draft from `v2.2.1`
+(`scripts/prepare_release_draft.py`). While the updater and README's latest
+links select the stable release, `v2.2.1` remains visible to visitors of the
+GitHub releases page; continue to identify it as an unaccepted prerelease.
 
 | Acceptance gate | Evidence to record for the *same* candidate | Status |
 | --- | --- | --- |
