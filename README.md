@@ -165,14 +165,21 @@ python -m electridrive.cli unmount ~/ElectriDrive
   two-way/download modes**, ElectriDrive's own `.electridrive-trash` is reserved
   as a recovery folder and not mirrored back to Drive, avoiding accidental
   resurrection of recently deleted files. Upload-only full backups include it.
-- **No false completeness claim:** symlinks (including links inside virtual
-  environments) and Linux special files cannot be represented faithfully as
-  ordinary Google Drive files. Full backup flags them as errors and aborts
-  before Drive writes, rather than silently skipping them. Permissions,
-  live-changing files, Google Drive limitations and duplicate remote names
-  can also prevent a completed backup. A successful upload is not an
-  encrypted system image: file modes, owners and filesystem links are not
-  preserved.
+- **Release blocker for roots containing symlinks:** full backup cannot yet
+  preserve and restore link metadata safely. This includes valid internal
+  links, absolute or relative external links, dangling links, cycles, and
+  links nested in `.venv`. The scanner never follows a link; it reports a
+  release-blocking error and aborts before Drive writes. Do not bypass this
+  check or treat such a run as a complete backup. A future link-preservation
+  format must be explicitly opted into and safely restore links without
+  traversing external targets.
+- **No false completeness claim:** Linux special files cannot be represented
+  faithfully as ordinary Google Drive files. Full backup flags them as errors
+  and aborts before Drive writes, rather than silently skipping them.
+  Permissions, live-changing files, Google Drive limitations and duplicate
+  remote names can also prevent a completed backup. A successful upload is
+  not an encrypted system image: file modes, owners and filesystem links are
+  not preserved.
 - **Privacy:** ElectriDrive does not add client-side encryption. Uploaded
   credentials, API tokens and private keys are readable to people/services
   with access to the corresponding Drive files. Encrypt sensitive archives
