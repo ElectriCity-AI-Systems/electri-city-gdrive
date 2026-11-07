@@ -76,7 +76,7 @@ GitHub releases page; continue to identify it as an unaccepted prerelease.
 
 | Acceptance gate | Evidence to record for the *same* candidate | Status |
 | --- | --- | --- |
-| Source and CI | Approved version/tag, `main` commit, CI run URL and all seven successful jobs on that exact commit | Pending. Merge CI run [42363701718](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/actions/runs/42363701718) has five successful Python jobs; both Debian package jobs are still running. |
+| Source and CI | Approved version/tag, `main` commit, CI run URL and all seven successful jobs on that exact commit | `main` commit `719823a9c4cb5e6f6a37fc1afc13d5d74de5f8c1`; [CI run 42363701718](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/actions/runs/42363701718) completed successfully with all five Python and both Ubuntu Debian-package jobs. This confirms CI only, not customer acceptance. |
 | Candidate artifacts | Workflow run, `.deb` and AppImage filenames, and SHA256 values checked against that run's `SHA256SUMS.txt` | Not built. Do not substitute the public `v2.2.1` hashes above. |
 | Build channel and publisher config | Verify `CUSTOMER-CANDIDATE`, exact source revision and no QA marker; record that authorized OAuth/Picker config was present without copying its values | Owner environment and secrets are owner-only; no candidate run was started. CI packages are `CI-QA — NOT FOR CUSTOMERS`. |
 | Fresh Ubuntu install and launch | Actual clean Ubuntu 26.04 host; install and launch each exact artifact with a fresh profile | Pending owner acceptance; CI smoke tests are not a substitute. |
