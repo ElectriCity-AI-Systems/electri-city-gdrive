@@ -4,15 +4,232 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 from uuid import uuid4
 
 
+_QA_SAFETY_LOGGER = logging.getLogger("electridrive.qa.safety")
+_SAFETY_DIAGNOSTICS = {
+    "an absolute path without traversal is required":
+        ("filesystem", "absolute-path-required", "A path must be absolute and contain no traversal components."),
+    "symlink components are forbidden":
+        ("filesystem", "symlink-component", "A protected path contains a symbolic link."),
+    "a registered directory is unavailable":
+        ("filesystem", "registered-directory-identity", "A registered directory is unavailable or has the wrong type."),
+    "unsafe profile file ownership, links or permissions":
+        ("profile", "profile-file-integrity", "A protected profile file has unsafe ownership, links, type, or permissions."),
+    "required policy file unavailable":
+        ("profile", "policy-file-available", "A required QA policy file could not be safely read."),
+    "invalid policy":
+        ("profile", "policy-format", "The QA policy is malformed or inconsistent."),
+    "invalid cloud capability list":
+        ("cloud", "cloud-capability-list-format", "The registered QA cloud capability list is malformed."),
+    "invalid cloud capability":
+        ("cloud", "cloud-capability-format", "A registered QA cloud capability is malformed."),
+    "invalid cloud capabilities":
+        ("cloud", "cloud-capabilities-format", "The registered QA cloud capabilities are malformed."),
+    "registered profile or data directory changed":
+        ("profile", "profile-directory-identity", "The registered profile or local data directory changed."),
+    "data and profile directories must be disjoint":
+        ("profile", "profile-data-separation", "The QA profile and synthetic data directory overlap."),
+    "policy changed while QA mode was active":
+        ("profile", "policy-immutability", "The active QA policy changed after validation."),
+    "invalid profile marker":
+        ("profile", "profile-marker-format", "An isolated profile marker is malformed."),
+    "missing or changed QA profile marker":
+        ("profile", "profile-marker-integrity", "An isolated profile marker is missing or changed."),
+    "cloud capabilities changed while QA mode was active":
+        ("cloud", "cloud-capability-immutability", "The registered cloud capability list changed while QA mode was active."),
+    "cloud root ID is not explicitly registered":
+        ("cloud", "root-explicit-registration", "The cloud root ID is not registered for this QA profile."),
+    "new synthetic cloud root could not be validated":
+        ("cloud", "new-root-validation", "A newly created synthetic cloud root did not match its required metadata."),
+    "local path is outside the synthetic QA data directory":
+        ("filesystem", "local-path-boundary", "The requested local path is outside the registered synthetic data directory."),
+    "unsupported local entry":
+        ("filesystem", "local-entry-type", "The local QA entry is not a supported regular file or directory."),
+    "hardlinked sources are forbidden":
+        ("filesystem", "hardlink-refusal", "A protected source file has multiple hard links."),
+    "local QA path is unavailable":
+        ("filesystem", "local-path-available", "A required local QA path is unavailable."),
+    "data directory identity changed":
+        ("filesystem", "data-directory-identity", "The registered data directory changed during file access."),
+    "source is not an independent regular QA file":
+        ("filesystem", "source-file-integrity", "The upload source is not an independent regular QA file."),
+    "download parent directory changed":
+        ("filesystem", "download-parent-identity", "The download destination directory changed during transfer."),
+    "dedicated, disjoint profile and data directories are required":
+        ("profile", "profile-data-initialization", "QA requires dedicated, disjoint profile and data directories."),
+    "policy already exists or data directory is not empty":
+        ("profile", "profile-initialization-state", "QA initialization requires an unused policy and empty synthetic data directory."),
+    "QA profile must be private and owned by the current user":
+        ("profile", "profile-permissions", "The QA profile must be private and owned by the current user."),
+    "invalid existing isolated settings":
+        ("profile", "initial-settings-format", "Existing isolated settings are malformed."),
+    "only an empty isolated file-scope profile can be sealed":
+        ("profile", "profile-sealing-preconditions", "Only an empty isolated file-scope profile can be sealed."),
+    "QA profile cannot be changed in a running process":
+        ("profile", "active-profile-immutability", "The QA profile cannot change during a running process."),
+    "invalid discovery marker":
+        ("profile", "profile-discovery-marker", "A QA profile discovery marker is malformed."),
+    "conflicting QA profile markers":
+        ("profile", "profile-marker-consistency", "QA profile discovery markers disagree."),
+    "malformed QA sync pair":
+        ("sync", "sync-pair-format", "A configured QA sync pair is malformed."),
+    "pair needs a registered QA cloud ID and deletion policy off":
+        ("sync", "sync-pair-scope", "A QA sync pair must use a registered root and disable deletion."),
+    "QA mode requires isolated drive.file scope":
+        ("auth", "qa-oauth-scope", "QA mode requires the isolated per-file OAuth scope."),
+    "malformed isolated settings":
+        ("profile", "settings-format", "The isolated settings file is malformed."),
+    "ordinary log handler cannot be inherited by QA mode":
+        ("logging", "qa-log-isolation", "An ordinary log handler cannot be used in QA mode."),
+    "unsafe QA log file":
+        ("logging", "qa-log-file-integrity", "The QA log file has unsafe ownership, links, or type."),
+    "--qa-profile requires a directory":
+        ("profile", "qa-profile-argument", "The QA profile option requires a directory."),
+    "conflicting QA profile options":
+        ("profile", "qa-profile-argument-consistency", "Conflicting QA profile options were supplied."),
+    "conflicting inherited QA profile":
+        ("profile", "qa-profile-environment-consistency", "The requested and inherited QA profiles differ."),
+    "operation is outside registered synthetic cloud trees":
+        ("cloud", "registered-cloud-tree-boundary", "The operation is outside the registered synthetic cloud trees."),
+    "cloud-client-profile-mismatch":
+        ("cloud", "cloud-client-profile-mismatch", "The Drive client is not bound to the selected QA profile."),
+    "active-qa-profile-mismatch":
+        ("cloud", "active-qa-profile-mismatch", "The active QA profile does not match the registered cloud facade."),
+    "raw-cloud-service-disabled":
+        ("cloud", "raw-cloud-service-disabled", "Direct access to the raw Drive service is disabled in QA mode."),
+    "cloud-search-disabled":
+        ("cloud", "cloud-search-disabled", "Cloud-wide search is disabled in QA mode."),
+    "cloud-list-all-disabled":
+        ("cloud", "cloud-list-all-disabled", "Cloud-wide file listing is disabled in QA mode."),
+    "cloud-starred-list-disabled":
+        ("cloud", "cloud-starred-list-disabled", "Listing starred cloud objects is disabled in QA mode."),
+    "cloud-trash-list-disabled":
+        ("cloud", "cloud-trash-list-disabled", "Listing cloud trash is disabled in QA mode."),
+    "cloud-trash-disabled":
+        ("cloud", "cloud-trash-disabled", "Moving cloud objects to trash is disabled in QA mode."),
+    "cloud-untrash-disabled":
+        ("cloud", "cloud-untrash-disabled", "Restoring cloud objects from trash is disabled in QA mode."),
+    "cloud-metadata-id-mismatch":
+        ("cloud", "cloud-metadata-id-mismatch", "The returned cloud metadata ID does not match the requested ID."),
+    "cloud-object-trashed":
+        ("cloud", "cloud-object-trashed", "A registered cloud object is marked as trashed."),
+    "cloud-root-not-folder":
+        ("cloud", "cloud-root-not-folder", "The registered cloud root is not a folder."),
+    "cloud-root-name-mismatch":
+        ("cloud", "cloud-root-name-mismatch", "The registered cloud root name changed."),
+    "cloud-root-parent-mismatch":
+        ("cloud", "cloud-root-parent-mismatch", "The registered cloud root parent changed."),
+    "cloud-root-nonce-mismatch":
+        ("cloud", "cloud-root-nonce-mismatch", "The registered cloud root QA nonce does not match the isolated profile."),
+    "cloud-parent-mismatch":
+        ("cloud", "cloud-parent-mismatch", "A cloud object is not in its registered parent folder."),
+    "cloud-parent-cycle":
+        ("cloud", "cloud-parent-cycle", "The registered cloud parent chain contains a cycle."),
+    "cloud-parent-not-folder":
+        ("cloud", "cloud-parent-not-folder", "The registered cloud parent is not a folder."),
+    "cloud-id-not-registered":
+        ("cloud", "cloud-id-not-registered", "The cloud object ID is not registered for this QA profile."),
+    "cloud-path-not-registered":
+        ("cloud", "cloud-path-not-registered", "The cloud path does not identify a registered QA root."),
+    "cloud-root-pagination-disabled":
+        ("cloud", "cloud-root-pagination-disabled", "Pagination tokens are not accepted when listing registered QA roots."),
+    "cloud-page-token-repeated":
+        ("cloud", "cloud-page-token-repeated", "The cloud listing returned a repeated pagination token."),
+    "cloud-object-name-invalid":
+        ("cloud", "cloud-object-name-invalid", "A cloud object name is not a valid single path component."),
+    "cloud-update-target-unsupported":
+        ("cloud", "cloud-update-target-unsupported", "The cloud update target is not a supported regular file."),
+    "cloud-update-id-changed":
+        ("cloud", "cloud-update-id-changed", "The cloud update returned an unexpected object ID."),
+    "unsafe database lock":
+        ("database", "qa-database-lock-integrity", "The QA database lock has unsafe ownership, links, type, or permissions."),
+    "database lock replaced":
+        ("database", "qa-database-lock-identity", "The QA database lock changed after it was opened."),
+    "database already in use":
+        ("database", "qa-database-exclusive-owner", "Another process already owns the QA database lock."),
+    "ordinary database cannot be reused":
+        ("database", "qa-database-isolation", "An ordinary database cannot be reused in QA mode."),
+    "database profile changed":
+        ("database", "qa-database-profile", "The active database profile changed."),
+    "database directory or lock changed":
+        ("database", "qa-database-path-identity", "The QA database directory or lock identity changed."),
+    "unexpected database snapshot":
+        ("database", "qa-database-snapshot-state", "An unexpected QA database snapshot appeared."),
+    "database snapshot changed":
+        ("database", "qa-database-snapshot-integrity", "The QA database snapshot changed after validation."),
+    "malformed database snapshot":
+        ("database", "qa-database-snapshot-format", "The QA database snapshot has an invalid format or schema."),
+    "FUSE is disabled":
+        ("runtime", "qa-fuse-disabled", "FUSE access is disabled in QA mode."),
+    "filesystem transfer journals are disabled":
+        ("transfers", "qa-transfer-journal-disabled", "Filesystem transfer journals are disabled in QA mode."),
+    "pre-existing ordinary Google client forbidden":
+        ("auth", "qa-client-provenance", "An ordinary Google client cannot be reused in QA mode."),
+    "injected Google credentials/service forbidden":
+        ("auth", "qa-client-injection", "Injected Google credentials or service objects are not allowed in QA mode."),
+    "select --qa-profile first":
+        ("profile", "qa-profile-required", "An explicit QA profile must be selected first."),
+    "only per-file access is supported":
+        ("auth", "qa-scope-change", "QA mode does not permit changing the isolated per-file OAuth scope."),
+    "Drive Picker is disabled; use registered QA roots":
+        ("cloud", "qa-picker-disabled", "Drive Picker is disabled; use an explicitly registered QA root."),
+    "log must belong to the isolated profile":
+        ("logging", "qa-log-destination", "The log destination must belong to the isolated QA profile."),
+    "deletion is forbidden":
+        ("sync", "qa-deletion-disabled", "Deletion operations are forbidden in QA mode."),
+}
+_UNKNOWN_DIAGNOSTIC = (
+    "internal", "unclassified-qa-safety-guard",
+    "An unclassified QA safety guard rejected the operation.",
+)
+_SAFETY_DIAGNOSTICS_BY_RULE = {
+    rule: (category, rule, reason)
+    for category, rule, reason in _SAFETY_DIAGNOSTICS.values()
+}
+
+
 class QaSafetyError(PermissionError):
-    pass
+    """A fail-closed QA stop with diagnostics restricted to safe static metadata."""
+
+    def __init__(self, reason: str = "", *, rule: str | None = None):
+        prefix = "QA safety stop: "
+        normalized = reason.removeprefix(prefix).removeprefix("QA safety: ")
+        diagnostic = (
+            _SAFETY_DIAGNOSTICS_BY_RULE.get(rule, _UNKNOWN_DIAGNOSTIC)
+            if rule is not None
+            else _SAFETY_DIAGNOSTICS.get(normalized, _UNKNOWN_DIAGNOSTIC)
+        )
+        category, rule, safe_reason = diagnostic
+        self.category = category
+        self.rule = rule
+        self.reason = safe_reason
+        super().__init__(f"QA safety stop [{category}/{rule}]: {safe_reason}")
+        _QA_SAFETY_LOGGER.warning(
+            "QA safety stop category=%s rule=%s reason=%s",
+            category,
+            rule,
+            safe_reason,
+            extra={
+                "qa_safety_category": category,
+                "qa_safety_rule": rule,
+                "qa_safety_reason": safe_reason,
+            },
+        )
+
+
+def log_exception(logger, message, *args, level=logging.ERROR):
+    """Avoid adding contextual data when a structured QA stop is already logged."""
+    if isinstance(sys.exc_info()[1], QaSafetyError):
+        return
+    logger.log(level, message, *args, exc_info=True)
 
 
 POLICY = ".electridrive-qa.json"
@@ -88,8 +305,8 @@ def _read(path, *, strict=True):
                 return stream.read()
         finally:
             os.close(directory)
-    except OSError as exc:
-        raise QaSafetyError("QA safety stop: required policy file unavailable") from exc
+    except OSError:
+        raise QaSafetyError("QA safety stop: required policy file unavailable") from None
 
 
 def _write(path, value):
@@ -126,8 +343,8 @@ class QaPolicy:
             if (data["version"] != 1 or data["profile"] != str(self.profile)
                     or not isinstance(self.nonce, str) or len(self.nonce) != 64):
                 _stop("invalid policy")
-        except (ValueError, KeyError, TypeError) as exc:
-            raise QaSafetyError("QA safety stop: invalid policy") from exc
+        except (ValueError, KeyError, TypeError):
+            raise QaSafetyError("QA safety stop: invalid policy") from None
         self._digest = hashlib.sha256(raw).hexdigest()
         remote_raw = _read(self.profile / REMOTES)
         self._remote_digest = hashlib.sha256(remote_raw).hexdigest()
@@ -141,8 +358,8 @@ class QaPolicy:
                         or not isinstance(spec["parents"], list) or len(spec["parents"]) != 1
                         or not isinstance(spec["parents"][0], str) or not spec["parents"][0]):
                     _stop("invalid cloud capability")
-        except (ValueError, KeyError, TypeError) as exc:
-            raise QaSafetyError("QA safety stop: invalid cloud capabilities") from exc
+        except (ValueError, KeyError, TypeError):
+            raise QaSafetyError("QA safety stop: invalid cloud capabilities") from None
         self.verify()
 
     def verify(self):
@@ -159,8 +376,8 @@ class QaPolicy:
         for area in ("config", "state"):
             try:
                 marker = json.loads(_read(self.profile / area / "electridrive" / MARKER))
-            except ValueError as exc:
-                raise QaSafetyError("QA safety stop: invalid profile marker") from exc
+            except ValueError:
+                raise QaSafetyError("QA safety stop: invalid profile marker") from None
             if marker != expected:
                 _stop("missing or changed QA profile marker")
         if hashlib.sha256(_read(self.profile / REMOTES)).hexdigest() != self._remote_digest:
@@ -283,8 +500,8 @@ def initialize(profile, local_root):
     if settings.exists():
         try:
             data = json.loads(_read(settings, strict=False))
-        except ValueError as exc:
-            raise QaSafetyError("QA safety stop: invalid existing isolated settings") from exc
+        except ValueError:
+            raise QaSafetyError("QA safety stop: invalid existing isolated settings") from None
         if data.get("sync_pairs") or data.get("scope", "file") != "file":
             _stop("only an empty isolated file-scope profile can be sealed")
     profile.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -322,8 +539,8 @@ def current_policy():
             if marker.exists() or marker.is_symlink():
                 try:
                     profiles.append(_absolute(json.loads(_read(marker))["profile"]))
-                except (KeyError, ValueError, TypeError) as exc:
-                    raise QaSafetyError("QA safety stop: invalid discovery marker") from exc
+                except (KeyError, ValueError, TypeError):
+                    raise QaSafetyError("QA safety stop: invalid discovery marker") from None
     if not profiles:
         return None
     if len(set(profiles)) != 1:

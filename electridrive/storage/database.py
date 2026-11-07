@@ -123,8 +123,8 @@ class SyncDatabase:
                 raise qa.QaSafetyError("QA safety stop: database lock replaced")
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise qa.QaSafetyError("QA safety stop: database already in use") from exc
+            except OSError:
+                raise qa.QaSafetyError("QA safety stop: database already in use") from None
         except Exception:
             self._release_qa_lock()
             raise
@@ -209,8 +209,8 @@ class SyncDatabase:
             self._conn.commit()
             self._snapshot_identity = self._identity(self._snapshot.lstat())
             self._snapshot_digest = hashlib.sha256(raw).hexdigest()
-        except (ValueError, TypeError, KeyError, sqlite3.Error, OverflowError) as exc:
-            raise qa.QaSafetyError("QA safety stop: malformed database snapshot") from exc
+        except (ValueError, TypeError, KeyError, sqlite3.Error, OverflowError):
+            raise qa.QaSafetyError("QA safety stop: malformed database snapshot") from None
 
     def _commit(self):
         self._conn.commit()
