@@ -19,6 +19,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from electridrive import qa_policy as qa
+
 LOGGER = logging.getLogger(__name__)
 
 GITHUB_OWNER = "ElectriCity-AI-Systems"
@@ -311,7 +313,9 @@ class UpdateCheckService:
         except Exception as exc:
             # Automatic checks must never affect application usability.  Manual checks
             # receive a concise result while details stay in debug logs.
-            LOGGER.debug("Update check failed: %s", exc, exc_info=True)
+            qa.log_exception(
+                LOGGER, "Update check failed: %s", exc, level=logging.DEBUG,
+            )
             return CheckResult(
                 CheckStatus.ERROR,
                 error_message="Could not check for updates. Check your network connection and try again.",

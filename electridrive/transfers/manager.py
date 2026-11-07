@@ -469,8 +469,9 @@ class TransferManager:
             t.error = str(exc)
             t.finished_at = time.time()
             self._finish(t, TransferState.FAILED)
-            LOGGER.exception("Transfer failed: %s", t.name)
-            self._log(f"{t.kind.value} FAILED: {t.name}: {exc}")
+            qa.log_exception(LOGGER, "Transfer failed: %s", t.name)
+            if not isinstance(exc, qa.QaSafetyError):
+                self._log(f"{t.kind.value} FAILED: {t.name}: {exc}")
 
     def _download_atomic(self, client, transfer: Transfer, progress) -> None:
         from electridrive.sync.safety import anchored_parent
@@ -534,22 +535,26 @@ class TransferManager:
                 self._save(t, state)
             except Exception as exc:
                 durable = False
-                LOGGER.exception("Could not save terminal transfer %s", t.id)
-                detail = f"Transfer journal persistence failed: {exc}. Outcome may not be saved."
-                if t.kind == TransferKind.UPLOAD and t.file_id:
-                    t.recovered = True
-                    detail += f" Upload already exists on Drive as {t.file_id}; do not upload it again."
-                elif state == TransferState.DONE:
-                    t.recovered = True
-                    detail += f" File was published at {t.dest_path}; verify that destination before retrying."
+                qa.log_exception(LOGGER, "Could not save terminal transfer %s", t.id)
+                if isinstance(exc, qa.QaSafetyError):
+                    detail = str(exc)
+                else:
+                    detail = f"Transfer journal persistence failed: {exc}. Outcome may not be saved."
+                    if t.kind == TransferKind.UPLOAD and t.file_id:
+                        t.recovered = True
+                        detail += f" Upload already exists on Drive as {t.file_id}; do not upload it again."
+                    elif state == TransferState.DONE:
+                        t.recovered = True
+                        detail += f" File was published at {t.dest_path}; verify that destination before retrying."
                 t.error = f"{t.error}; {detail}" if t.error else detail
                 state = TransferState.FAILED
                 t.state = state
                 try:
                     self._save(t)
                 except Exception:
-                    LOGGER.exception("Could not save transfer persistence failure %s", t.id)
-                self._log(t.error)
+                    qa.log_exception(LOGGER, "Could not save transfer persistence failure %s", t.id)
+                if not isinstance(exc, qa.QaSafetyError):
+                    self._log(t.error)
             else:
                 t.state = state
             self._outstanding -= 1
@@ -564,8 +569,9 @@ class TransferManager:
             with self._lock:
                 self._save(t)
         except Exception as exc:
-            LOGGER.exception("Could not save transfer %s", t.id)
-            self._log(f"Could not save transfer {t.id}: {exc}")
+            qa.log_exception(LOGGER, "Could not save transfer %s", t.id)
+            self._log(str(exc) if isinstance(exc, qa.QaSafetyError)
+                      else f"Could not save transfer {t.id}: {exc}")
             return False
         self._notify(t)
         return True
@@ -575,7 +581,9 @@ class TransferManager:
             try:
                 self._on_update(t)
             except Exception:  # a broken UI callback must not kill a worker
-                LOGGER.debug("on_update callback raised", exc_info=True)
+                qa.log_exception(
+                    LOGGER, "on_update callback raised", level=logging.DEBUG,
+                )
 
     def _log(self, message: str) -> None:
         LOGGER.info(message)
@@ -583,4 +591,6 @@ class TransferManager:
             try:
                 self._on_log(message)
             except Exception:
-                LOGGER.debug("on_log callback raised", exc_info=True)
+                qa.log_exception(
+                    LOGGER, "on_log callback raised", level=logging.DEBUG,
+                )

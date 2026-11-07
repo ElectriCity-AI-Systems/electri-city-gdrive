@@ -704,6 +704,45 @@ def test_owner_selected_canonical_id_survives_settings_reload(tmp_path: Path):
         db.close()
 
 
+def test_reviewed_canonical_id_only_updates_selected_duplicate_after_reload(
+    tmp_path: Path,
+):
+    root = tmp_path / "sync"
+    root.mkdir()
+    local_file = root / "same.txt"
+    local_file.write_bytes(b"selected")
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    first_duplicate = fake.add_file("same.txt", b"first", parent=folder)
+    second_duplicate = fake.add_file("same.txt", b"second", parent=folder)
+    canonical = fake.add_file("same.txt", b"selected", parent=folder)
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(
+            str(root), "ElectriDrive/SyncTest", direction="up_only",
+            delete_policy="off", canonical_remote_ids={"same.txt": canonical},
+        )
+        persisted = Settings.from_dict(Settings(sync_pairs=[pair]).to_dict())
+        initial = TwoWaySyncEngine(fake, db, persisted.sync_pairs[0]).run()
+        assert initial.failed == 0
+        assert initial.uploaded == initial.downloaded == 0
+
+        local_file.write_bytes(b"new selected content")
+        restarted_pair = Settings.from_dict(persisted.to_dict()).sync_pairs[0]
+        report = TwoWaySyncEngine(fake, db, restarted_pair).run()
+
+        assert report.failed == 0 and report.uploaded == 1
+        assert report.downloaded == report.trashed_local == report.trashed_remote == 0
+        assert fake.updates == [(canonical, str(local_file), None)]
+        assert fake.nodes[canonical]["content"] == b"new selected content"
+        assert fake.nodes[first_duplicate]["content"] == b"first"
+        assert fake.nodes[second_duplicate]["content"] == b"second"
+        assert not fake.nodes[first_duplicate]["trashed"]
+        assert not fake.nodes[second_duplicate]["trashed"]
+    finally:
+        db.close()
+
+
 def test_duplicate_folder_and_file_folder_collisions_are_reported_without_mutation(
     tmp_path: Path,
 ):

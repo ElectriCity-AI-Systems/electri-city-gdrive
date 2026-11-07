@@ -3,15 +3,15 @@ from electridrive.qa_policy import QaSafetyError, current_policy
 from electridrive.google_api.client import FileListing, GoogleDriveClient
 
 
-def _deny(*args, **kwargs):
-    raise QaSafetyError("QA safety stop: operation is outside registered synthetic cloud trees")
+def _deny(*, rule):
+    raise QaSafetyError(rule=rule)
 
 
 class QaDriveClient:
     def __init__(self, client, policy):
         policy.verify()
         if isinstance(client, GoogleDriveClient) and client._qa_profile != str(policy.profile):
-            _deny()
+            _deny(rule="cloud-client-profile-mismatch")
         self.__client = client
         self.__policy = policy
         self.__parents = {}
@@ -20,36 +20,42 @@ class QaDriveClient:
         self.__policy.verify()
         active = current_policy()
         if active is None or active.profile != self.__policy.profile:
-            _deny()
+            _deny(rule="active-qa-profile-mismatch")
 
     @property
     def service(self):
-        return _deny()
+        return _deny(rule="raw-cloud-service-disabled")
 
     def _check(self, rid, seen=None):
         self.verify()
         seen = set() if seen is None else seen
         if rid in seen:
-            _deny()
+            _deny(rule="cloud-parent-cycle")
         seen.add(rid)
         roots = self.__policy.remote_ids
         if rid not in roots and rid not in self.__parents:
-            _deny()
+            _deny(rule="cloud-id-not-registered")
         remote = self.__client.get_metadata(rid)
-        if remote.id != rid or remote.trashed:
-            _deny()
+        if remote.id != rid:
+            _deny(rule="cloud-metadata-id-mismatch")
+        if remote.trashed:
+            _deny(rule="cloud-object-trashed")
         if rid in roots:
             spec = self.__policy.root_spec(rid)
-            if (not remote.is_folder or remote.name != spec['name'] or
-                list(remote.parents) != spec['parents'] or
-                remote.app_properties.get('electridrive_qa_nonce') != self.__policy.nonce):
-                _deny()
+            if not remote.is_folder:
+                _deny(rule="cloud-root-not-folder")
+            if remote.name != spec['name']:
+                _deny(rule="cloud-root-name-mismatch")
+            if list(remote.parents) != spec['parents']:
+                _deny(rule="cloud-root-parent-mismatch")
+            if remote.app_properties.get('electridrive_qa_nonce') != self.__policy.nonce:
+                _deny(rule="cloud-root-nonce-mismatch")
         else:
             parent = self.__parents[rid]
             if remote.parents != (parent,):
-                _deny()
+                _deny(rule="cloud-parent-mismatch")
             if not self._check(parent, seen).is_folder:
-                _deny()
+                _deny(rule="cloud-parent-not-folder")
         return remote
 
     def _remember(self, rid, parent):
@@ -59,10 +65,10 @@ class QaDriveClient:
     def ensure_folder_path(self, remote_path):
         self.verify()
         if not isinstance(remote_path, str) or not remote_path.startswith('qa:'):
-            _deny()
+            _deny(rule="cloud-path-not-registered")
         rid = remote_path[3:]
         if rid not in self.__policy.remote_ids:
-            _deny()
+            _deny(rule="cloud-path-not-registered")
         self._check(rid)
         return rid
 
@@ -70,15 +76,17 @@ class QaDriveClient:
         self.verify()
         if parent_id == 'root':
             if page_token is not None:
-                _deny()
+                _deny(rule="cloud-root-pagination-disabled")
             return FileListing([self._check(rid) for rid in self.__policy.remote_ids])
         if not self._check(parent_id).is_folder:
-            _deny()
+            _deny(rule="cloud-parent-not-folder")
         result = self.__client.list_folder(parent_id, page_token)
         files = []
         for remote in result.files:
-            if remote.parents != (parent_id,) or remote.trashed:
-                _deny()
+            if remote.parents != (parent_id,):
+                _deny(rule="cloud-parent-mismatch")
+            if remote.trashed:
+                _deny(rule="cloud-object-trashed")
             files.append(self._remember(remote.id, parent_id))
         return FileListing(files, result.next_page_token)
 
@@ -97,7 +105,7 @@ class QaDriveClient:
             if not page:
                 break
             if page in seen:
-                _deny()
+                _deny(rule="cloud-page-token-repeated")
             seen.add(page)
         if len(matches) > 1:
             raise ValueError('Ambiguous QA Drive path')
@@ -112,12 +120,12 @@ class QaDriveClient:
     @staticmethod
     def _name(name):
         if not isinstance(name, str) or not name.strip() or name in {".", ".."} or any(c in name for c in ("/", "\\", "\x00")):
-            _deny()
+            _deny(rule="cloud-object-name-invalid")
 
     def create_folder(self, name, parent_id=None):
         self._name(name)
         if not self._check(parent_id).is_folder:
-            _deny()
+            _deny(rule="cloud-parent-not-folder")
         rid = self.__client.create_folder(name, parent_id)
         self._remember(rid, parent_id)
         return rid
@@ -134,7 +142,7 @@ class QaDriveClient:
         self._name(remote_name)
         self.__policy.local(local_file)
         if not self._check(parent_id).is_folder:
-            _deny()
+            _deny(rule="cloud-parent-not-folder")
         rid = self.__client.upload_file(local_file, parent_id, remote_name, progress_cb)
         self._remember(rid, parent_id)
         return rid
@@ -145,10 +153,10 @@ class QaDriveClient:
             self._name(remote_name)
         target = self._check(file_id)
         if target.is_folder or target.is_google_doc:
-            _deny()
+            _deny(rule="cloud-update-target-unsupported")
         result = self.__client.update_file(file_id, local_file, remote_name, progress_cb)
         if result != file_id:
-            _deny()
+            _deny(rule="cloud-update-id-changed")
         self._check(file_id)
         return result
 
@@ -174,4 +182,20 @@ class QaDriveClient:
         self.verify()
         return self.__client.get_about()
 
-    search = list_files = list_starred = list_trash = trash = untrash = _deny
+    def search(self, *args, **kwargs):
+        return _deny(rule="cloud-search-disabled")
+
+    def list_files(self, *args, **kwargs):
+        return _deny(rule="cloud-list-all-disabled")
+
+    def list_starred(self, *args, **kwargs):
+        return _deny(rule="cloud-starred-list-disabled")
+
+    def list_trash(self, *args, **kwargs):
+        return _deny(rule="cloud-trash-list-disabled")
+
+    def trash(self, *args, **kwargs):
+        return _deny(rule="cloud-trash-disabled")
+
+    def untrash(self, *args, **kwargs):
+        return _deny(rule="cloud-untrash-disabled")

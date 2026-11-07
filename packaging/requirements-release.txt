@@ -3,7 +3,7 @@
 # Update deliberately; release builds must not inherit versions from the host.
 altgraph==0.17.5
 backports.tarfile==1.2.0
-certifi==2026.7.22
+certifi==2026.10.19
 cffi==2.1.1
 charset-normalizer==3.5.1
 cryptography==50.0.0
@@ -27,7 +27,7 @@ oauthlib==4.0.0
 packaging==26.3
 proto-plus==1.28.3
 protobuf==7.35.1
-pyasn1==0.6.4
+pyasn1==0.6.5
 pyasn1_modules==0.4.2
 pycparser==3.0
 pyinstaller==6.22.3

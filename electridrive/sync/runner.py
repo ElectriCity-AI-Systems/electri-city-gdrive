@@ -60,7 +60,10 @@ def run_configured_pairs(
                     f"{pair.local_path} <-> {pair.remote_folder}"
                 )
             except Exception:
-                LOGGER.warning("Configured sync log callback failed", exc_info=True)
+                qa.log_exception(
+                    LOGGER, "Configured sync log callback failed",
+                    level=logging.WARNING,
+                )
         try:
             report = TwoWaySyncEngine(
                 client, db, pair, rules=rules, log_cb=log_cb, cancel_event=cancel_event
@@ -70,8 +73,13 @@ def run_configured_pairs(
         except Exception as exc:
             # Pair isolation is a correctness requirement: a broken selected
             # root must never prevent later configured roots from running.
-            LOGGER.exception("Configured sync pair failed: %s", pair.local_path)
-            report = SyncReport(failed=1, errors=[f"pair execution failed: {exc}"])
+            qa.log_exception(
+                LOGGER, "Configured sync pair failed: %s", pair.local_path,
+            )
+            error = str(exc) if isinstance(exc, qa.QaSafetyError) else (
+                f"pair execution failed: {exc}"
+            )
+            report = SyncReport(failed=1, errors=[error])
 
         check_cancelled(cancel_event)
         aggregate.outcomes.append(PairOutcome(pair, report))

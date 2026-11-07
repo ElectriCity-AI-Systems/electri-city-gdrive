@@ -154,8 +154,13 @@ def test_registered_id_and_nonce_anchor_cloud_scope(qa_remote, sealed):
         guarded.get_metadata(other)
 
 
-@pytest.mark.parametrize("change", ["nonce", "parents", "name", "trashed"])
-def test_remote_root_change_stops_before_write(qa_remote, sealed, change):
+@pytest.mark.parametrize("change, rule", [
+    ("nonce", "cloud-root-nonce-mismatch"),
+    ("parents", "cloud-root-parent-mismatch"),
+    ("name", "cloud-root-name-mismatch"),
+    ("trashed", "cloud-object-trashed"),
+])
+def test_remote_root_change_stops_before_write(qa_remote, sealed, change, rule):
     fake, guarded, rid = qa_remote
     source = sealed.local_root / "sample.txt"
     source.write_bytes(b"synthetic")
@@ -165,8 +170,9 @@ def test_remote_root_change_stops_before_write(qa_remote, sealed, change):
         fake.nodes[rid]["parent"] = fake.add_folder("other")
     else:
         fake.nodes[rid][change] = True if change == "trashed" else "changed"
-    with pytest.raises(qa.QaSafetyError):
+    with pytest.raises(qa.QaSafetyError) as caught:
         guarded.upload_file(source, rid, source.name)
+    assert caught.value.rule == rule
     assert not fake.uploads
 
 
@@ -182,8 +188,9 @@ def test_reparented_child_and_deletion_are_denied(qa_remote, sealed):
     for method in (guarded.trash, guarded.untrash):
         with pytest.raises(qa.QaSafetyError):
             method(fid)
-    with pytest.raises(qa.QaSafetyError):
+    with pytest.raises(qa.QaSafetyError) as caught:
         _ = guarded.service
+    assert caught.value.rule == "raw-cloud-service-disabled"
     assert not fake.updates and not fake.nodes[fid]["trashed"]
 
 
