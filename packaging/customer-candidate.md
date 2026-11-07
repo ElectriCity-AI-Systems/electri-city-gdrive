@@ -50,6 +50,43 @@ package, then launches both exact artifacts in a GUI smoke test. No developer
 JSON or CLI OAuth setup is used. Automation does not contact Google or perform
 real Drive operations.
 
+## Release acceptance matrix
+
+The public `v2.2.1` prerelease is stale, not evidence for the post-merge source:
+it was published on 2026-11-03 from tag commit
+`57b7caf8afc3df649136405ecef2950ec735ac82`, before the current `main` commit
+`719823a9c4cb5e6f6a37fc1afc13d5d74de5f8c1`. Its existing assets must remain
+unchanged and must not be accepted as the newly validated build:
+
+| Public `v2.2.1` asset | Published SHA256 |
+| --- | --- |
+| `electridrive_2.2.1_amd64.deb` | `c3b38260b39665d2dfe8c886d3c905d69491fdcb8dc403062790c5e703565c4f` |
+| `ElectriDrive-x86_64.AppImage` | `f6b5a316b55a6385860fcc39a18ccea2ecd0c5d05a25b7d41686cd865c536986` |
+
+The public stable latest remains `v2.1.3`; the updater selects only non-draft,
+non-prerelease releases. Recommend a distinct `v2.2.2` candidate after owner
+approval and compatibility review. The current source and candidate workflow
+still name version `2.2.1`; do not dispatch a new candidate or reuse that version
+until an approved version update is made. The public release/tag is not to be
+moved or overwritten. The release-draft helper also refuses an already existing
+tag or release, so it cannot create a fresh draft from `v2.2.1`
+(`scripts/prepare_release_draft.py`). While the updater and README's latest
+links select the stable release, `v2.2.1` remains visible to visitors of the
+GitHub releases page; continue to identify it as an unaccepted prerelease.
+
+| Acceptance gate | Evidence to record for the *same* candidate | Status |
+| --- | --- | --- |
+| Source and CI | Approved version/tag, `main` commit, CI run URL and all seven successful jobs on that exact commit | `main` commit `719823a9c4cb5e6f6a37fc1afc13d5d74de5f8c1`; [CI run 42363701718](https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/actions/runs/42363701718) completed successfully with all five Python and both Ubuntu Debian-package jobs. This confirms CI only, not customer acceptance. |
+| Candidate artifacts | Workflow run, `.deb` and AppImage filenames, and SHA256 values checked against that run's `SHA256SUMS.txt` | Not built. Do not substitute the public `v2.2.1` hashes above. |
+| Build channel and publisher config | Verify `CUSTOMER-CANDIDATE`, exact source revision and no QA marker; record that authorized OAuth/Picker config was present without copying its values | Owner environment and secrets are owner-only; no candidate run was started. CI packages are `CI-QA — NOT FOR CUSTOMERS`. |
+| Fresh Ubuntu install and launch | Actual clean Ubuntu 26.04 host; install and launch each exact artifact with a fresh profile | Pending owner acceptance; CI smoke tests are not a substitute. |
+| Sign-in and Picker | Complete Google sign-in and select the publisher-owned synthetic test folder using each installed artifact | Pending owner acceptance; automation does not contact Google. |
+| 45-byte round trip and restart | Record synthetic file SHA256; upload and download it, compare with `cmp` and SHA256, restart/reconnect, then confirm app launch and Picker still work | Pending owner acceptance; no real Drive operation was run. |
+
+Full-backup scans fail closed on symlinks because preserving their meaning is
+unsupported. Do not describe backup as unrestricted or treat a blocked scan as a
+successful complete backup.
+
 ## Release remains blocked
 
 The following are owner-only gates; none is inferred from CI:
