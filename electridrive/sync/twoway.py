@@ -1075,8 +1075,13 @@ class TwoWaySyncEngine:
                 raise
             except Exception as exc:
                 report.failed += 1
-                report.errors.append(f"{a.kind.value} {a.rel}: {exc}")
-                LOGGER.exception("Sync action failed: %s %s", a.kind.value, a.rel)
+                error = str(exc) if isinstance(exc, qa.QaSafetyError) else (
+                    f"{a.kind.value} {a.rel}: {exc}"
+                )
+                report.errors.append(error)
+                qa.log_exception(
+                    LOGGER, "Sync action failed: %s %s", a.kind.value, a.rel,
+                )
 
         self._check_cancel()
         self._check_completeness(local, remote, report)
@@ -1547,6 +1552,12 @@ class TwoWaySyncEngine:
                                 dst_dir_fd=parent_fd, follow_symlinks=False)
                     except FileExistsError:
                         pass
+                    except qa.QaSafetyError:
+                        raise
                     except OSError:
-                        LOGGER.exception('Could not restore destination; preserved at %s', recovery_rel)
+                        qa.log_exception(
+                            LOGGER,
+                            'Could not restore destination; preserved at %s',
+                            recovery_rel,
+                        )
             raise

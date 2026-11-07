@@ -394,7 +394,7 @@ class FuseMount:
                 FUSE(fs_cls(tree), str(mp), foreground=True, nothreads=True, ro=True)
             except Exception as exc:
                 self._error = exc
-                LOGGER.exception("FUSE mount exited with error")
+                qa.log_exception(LOGGER, "FUSE mount exited with error")
 
         self._thread = threading.Thread(target=run, name="electridrive-fuse", daemon=True)
         self._thread.start()

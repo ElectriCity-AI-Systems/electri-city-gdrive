@@ -17,21 +17,51 @@ def policy(monkeypatch, tmp_path):
     return qa.current_policy()
 
 
+@pytest.fixture
+def registered_root(policy):
+    from dataclasses import replace
+
+    class SyntheticDrive(FakeDrive):
+        def _to_remote(self, node):
+            return replace(
+                super()._to_remote(node),
+                app_properties=node.get('app_properties', {}),
+            )
+
+    fake = SyntheticDrive()
+    root_id = fake.add_folder('synthetic')
+    fake.nodes[root_id]['app_properties'] = {
+        'electridrive_qa_nonce': policy.nonce,
+    }
+    policy.register_new_root(fake.get_metadata(root_id), 'synthetic')
+    return fake, QaDriveClient(fake, policy), root_id
+
+
 def test_unknown_id_refused_before_remote_read(policy):
     class Spy(FakeDrive):
         def get_metadata(self, rid):
             pytest.fail('Unknown ID must not be fetched')
     client = QaDriveClient(Spy(), policy)
-    with pytest.raises(qa.QaSafetyError):
+    with pytest.raises(qa.QaSafetyError) as caught:
         client.get_metadata('personal')
+    assert caught.value.rule == 'cloud-id-not-registered'
     assert client.list_folder().files == []
 
 
 def test_wide_operations_are_closed(policy):
     client = QaDriveClient(FakeDrive(), policy)
-    for name in ('search', 'list_files', 'list_starred', 'list_trash', 'trash', 'untrash'):
-        with pytest.raises(qa.QaSafetyError):
+    expected_rules = {
+        'search': 'cloud-search-disabled',
+        'list_files': 'cloud-list-all-disabled',
+        'list_starred': 'cloud-starred-list-disabled',
+        'list_trash': 'cloud-trash-list-disabled',
+        'trash': 'cloud-trash-disabled',
+        'untrash': 'cloud-untrash-disabled',
+    }
+    for name, rule in expected_rules.items():
+        with pytest.raises(qa.QaSafetyError) as caught:
             getattr(client, name)('anything')
+        assert caught.value.rule == rule
     assert client.get_start_page_token() is None
     assert client.list_changes('anything') is None
 
@@ -142,3 +172,122 @@ def test_native_workspace_media_update_is_refused(policy):
     with pytest.raises(qa.QaSafetyError):
         client.update_file(fid, source)
     assert not fake.updates
+
+
+def test_same_name_uploads_register_and_revalidate_each_qa_file_id(
+    registered_root, policy,
+):
+    fake, client, root_id = registered_root
+    sources = []
+    for name, content in (
+        ('duplicate-a.bin', b'artificial duplicate A'),
+        ('duplicate-b.bin', b'artificial duplicate B'),
+    ):
+        source = policy.local_root / name
+        source.write_bytes(content)
+        sources.append((source, content))
+
+    first_id = client.upload_file(sources[0][0], root_id, 'same-name.txt')
+    second_id = client.upload_file(sources[1][0], root_id, 'same-name.txt')
+
+    assert first_id != second_id
+    assert client.get_metadata(first_id).parents == (root_id,)
+    assert client.get_metadata(second_id).parents == (root_id,)
+    matches = [
+        item for item in client.list_folder(root_id).files
+        if item.name == 'same-name.txt'
+    ]
+    assert {item.id for item in matches} == {first_id, second_id}
+    assert len(fake.uploads) == 2 and not fake.updates
+    assert fake.nodes[first_id]['content'] == sources[0][1]
+    assert fake.nodes[second_id]['content'] == sources[1][1]
+
+
+def test_qa_metadata_revalidation_logs_exact_parent_guard_if_file_leaves_root(
+    registered_root, policy, caplog,
+):
+    fake, client, root_id = registered_root
+    source = policy.local_root / 'duplicate.bin'
+    source.write_bytes(b'artificial duplicate')
+    file_id = client.upload_file(source, root_id, 'same-name.txt')
+    assert client.get_metadata(file_id).parents == (root_id,)
+
+    outside = fake.add_folder('outside')
+    fake.nodes[file_id]['parent'] = outside
+
+    with caplog.at_level('WARNING', logger='electridrive.qa.safety'):
+        with pytest.raises(qa.QaSafetyError) as caught:
+            client.get_metadata(file_id)
+    record = next(record for record in caplog.records
+                  if record.name == 'electridrive.qa.safety')
+    assert caught.value.category == 'cloud'
+    assert caught.value.rule == 'cloud-parent-mismatch'
+    assert record.qa_safety_category == 'cloud'
+    assert record.qa_safety_rule == 'cloud-parent-mismatch'
+    assert record.qa_safety_reason == 'A cloud object is not in its registered parent folder.'
+    assert 'outside' not in record.getMessage()
+    assert 'artificial duplicate' not in record.getMessage()
+    assert not fake.updates and not fake.nodes[file_id]['trashed']
+
+
+def test_qa_safety_diagnostic_does_not_log_untrusted_path(policy, tmp_path, caplog):
+    secret_marker = 'private-fixture-path-marker'
+    outside = tmp_path / secret_marker
+    with caplog.at_level('WARNING', logger='electridrive.qa.safety'):
+        with pytest.raises(qa.QaSafetyError) as caught:
+            policy.local(outside)
+
+    record = next(record for record in caplog.records
+                  if record.name == 'electridrive.qa.safety')
+    assert caught.value.rule == 'local-path-boundary'
+    assert record.qa_safety_category == 'filesystem'
+    assert record.qa_safety_rule == 'local-path-boundary'
+    assert secret_marker not in record.getMessage()
+    assert secret_marker not in str(caught.value)
+
+
+def test_unknown_qa_safety_reason_is_replaced_with_safe_diagnostic(caplog):
+    secret_marker = 'token-like-private-value'
+    with caplog.at_level('WARNING', logger='electridrive.qa.safety'):
+        error = qa.QaSafetyError(f'unknown guard: {secret_marker}')
+
+    record = next(record for record in caplog.records
+                  if record.name == 'electridrive.qa.safety')
+    assert error.rule == 'unclassified-qa-safety-guard'
+    assert record.qa_safety_category == 'internal'
+    assert secret_marker not in record.getMessage()
+    assert secret_marker not in str(error)
+
+
+def test_safety_stop_does_not_get_relogged_with_context(caplog):
+    import logging
+
+    secret_marker = 'private-file-context'
+    logger = logging.getLogger('fixture.context')
+    with caplog.at_level('WARNING'):
+        try:
+            raise qa.QaSafetyError('local path is outside the synthetic QA data directory')
+        except qa.QaSafetyError:
+            qa.log_exception(logger, 'sync failed for %s', secret_marker)
+
+    assert not any(record.name == 'fixture.context' for record in caplog.records)
+    diagnostic = next(record for record in caplog.records
+                      if record.name == 'electridrive.qa.safety')
+    assert diagnostic.qa_safety_rule == 'local-path-boundary'
+    assert secret_marker not in diagnostic.getMessage()
+
+
+def test_unrelated_exceptions_keep_existing_error_logging(caplog):
+    import logging
+
+    logger = logging.getLogger('fixture.context')
+    with caplog.at_level('ERROR'):
+        try:
+            raise ValueError('ordinary failure')
+        except ValueError:
+            qa.log_exception(logger, 'operation failed: %s', 'fixture')
+
+    record = next(record for record in caplog.records
+                  if record.name == 'fixture.context')
+    assert record.getMessage() == 'operation failed: fixture'
+    assert record.exc_info[0] is ValueError

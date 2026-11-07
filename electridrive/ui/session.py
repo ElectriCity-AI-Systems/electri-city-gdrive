@@ -36,7 +36,7 @@ class _Worker:
             qa.check_startup()
             result = self._fn(*self._args, **self._kwargs)
         except Exception as exc:  # surfaced to the UI via the error signal
-            LOGGER.exception("Background task failed")
+            qa.log_exception(LOGGER, "Background task failed")
             error = str(exc)
             self.signals.error.emit(error)
         else:
@@ -203,7 +203,7 @@ class DriveSession(QObject):
             else:
                 manager.replace_client(client)
         except Exception as exc:
-            LOGGER.exception("Could not open account transfer queue")
+            qa.log_exception(LOGGER, "Could not open account transfer queue")
             self.connect_failed.emit(str(exc))
             return False
         self.account_key = identity

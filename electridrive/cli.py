@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Cancelled")
         return 130
     except Exception as exc:
-        LOGGER.exception("Command failed")
+        qa.log_exception(LOGGER, "Command failed")
         print(f"Error: {exc}")
         return 1
 
