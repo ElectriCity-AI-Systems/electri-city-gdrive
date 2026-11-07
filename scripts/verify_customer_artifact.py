@@ -15,6 +15,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from electridrive.build_gate import (  # noqa: E402
+    CUSTOMER_CHANNEL,
+    QA_CHANNEL,
+    QA_MARKER_NAME,
+    validate_build_inputs,
+)
 from electridrive.google_api.release_config import validate_customer_config
 
 _GLIBC = re.compile(r"\(GLIBC_(\d+(?:\.\d+)+)\)")
@@ -104,7 +110,12 @@ def _extract(path: Path, destination: Path) -> Path:
     raise ValueError("artifact must be a .deb, AppImage, or extracted package directory")
 
 
-def verify(path: Path, expected_channel: str, max_glibc: str = "2.35") -> list[str]:
+def verify(
+    path: Path,
+    expected_channel: str,
+    max_glibc: str = "2.35",
+    expected_revision: str | None = None,
+) -> list[str]:
     if not path.exists():
         return [f"artifact does not exist: {path}"]
     errors: list[str] = []
@@ -116,15 +127,21 @@ def verify(path: Path, expected_channel: str, max_glibc: str = "2.35") -> list[s
         if path.suffix == ".AppImage":
             errors.extend(_appimage_runtime_errors(path.resolve(), max_glibc))
         channels = list(root.rglob("build_channel.txt"))
-        if not channels:
-            errors.append("artifact has no embedded build-channel watermark")
+        if len(channels) != 1:
+            errors.append("artifact must contain exactly one build-channel watermark")
         else:
-            try:
-                values = {item.read_text(encoding="utf-8").strip() for item in channels}
-            except (OSError, UnicodeError):
-                values = set()
-            if len(channels) != 1 or values != {expected_channel}:
-                errors.append("artifact build-channel watermark does not match expected channel")
+            errors.extend(
+                validate_build_inputs(
+                    channels[0].parent,
+                    expected_channel=expected_channel,
+                    expected_revision=expected_revision,
+                )
+            )
+        markers = list(root.rglob(QA_MARKER_NAME))
+        if expected_channel == QA_CHANNEL and len(markers) != 1:
+            errors.append("CI-QA artifact must contain exactly one NOT FOR DISTRIBUTION marker")
+        elif expected_channel == CUSTOMER_CHANNEL and markers:
+            errors.append("customer candidate must not contain a CI-QA marker")
         errors.extend(_glibc_errors(root, max_glibc))
 
         clients = list(root.rglob("client_baked.json"))
@@ -149,8 +166,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--expected-channel", choices=("CI-QA", "CUSTOMER-CANDIDATE"), required=True)
     parser.add_argument("--max-glibc", default="2.35")
+    parser.add_argument("--expected-revision")
     args = parser.parse_args(argv)
-    errors = verify(args.artifact, args.expected_channel, args.max_glibc)
+    errors = verify(
+        args.artifact,
+        args.expected_channel,
+        args.max_glibc,
+        args.expected_revision,
+    )
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

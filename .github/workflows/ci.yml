@@ -40,6 +40,14 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
 
+      - name: Run package-gate tests with restrictive and default umasks
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          for mask in 077 022; do
+            ( umask "$mask"; python -m pytest tests/test_release_gate.py -q )
+          done
+
       - name: Compile Python sources
         run: python -m compileall -q electridrive server tests
 
@@ -81,7 +89,7 @@ jobs:
 
       - name: Install and launch the built package from terminal and desktop entry
         run: |
-          sudo apt-get install -y ./dist/electridrive_*_amd64.deb
+          sudo apt-get install -y ./dist/electridrive-CI-QA_*_amd64.deb
           profile="$(mktemp -d)"
           mkdir -p "$profile/config" "$profile/state" "$profile/cache" "$profile/runtime"
           chmod 700 "$profile/runtime"
@@ -128,9 +136,16 @@ jobs:
               wait "$launcher" 2>/dev/null || true
             '
 
+      - name: Verify the QA sentinel and source provenance
+        run: |
+          package="$(find dist -maxdepth 1 -name 'electridrive-CI-QA_*_amd64.deb' -print -quit)"
+          test -n "$package"
+          python scripts/verify_customer_artifact.py "$package" \
+            --expected-channel CI-QA --expected-revision "$GITHUB_SHA"
+
       - name: Upload verified Debian package
         uses: actions/upload-artifact@v6
         with:
-          name: electridrive-CI-QA-debian-${{ matrix.os }}-${{ github.sha }}
-          path: dist/electridrive_*_amd64.deb
+          name: QA-ONLY-NOT-FOR-DISTRIBUTION-electridrive-${{ matrix.os }}-${{ github.sha }}
+          path: dist/electridrive-CI-QA_*_amd64.deb
           if-no-files-found: error

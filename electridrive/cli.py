@@ -19,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     from electridrive.vfs import fuse_available
+    from electridrive.google_api import app_client
 
     paths = get_paths()
     print("ElectriDrive doctor")
@@ -29,6 +30,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"Credentials file: {paths.credentials_file} {'OK' if paths.credentials_file.exists() else 'MISSING'}")
     print(f"Database file:    {paths.database_file}")
     print(f"OAuth scopes:     {', '.join(selected_scopes())}")
+    print(f"OAuth client:     {'configured' if app_client.is_configured() else 'unavailable'}")
+    print(f"Google Picker:    {'configured' if app_client.is_picker_configured() else 'unavailable'}")
     print(f"FUSE available:   {'yes' if fuse_available() else 'no'}")
     return 0
 

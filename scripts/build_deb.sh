@@ -6,28 +6,33 @@ PY="${PY:-.venv/bin/python}"
 MAX_GLIBC_VERSION="${MAX_GLIBC_VERSION:-2.35}"
 BUILD_CHANNEL="${ELECTRIDRIVE_BUILD_CHANNEL:-CUSTOMER-CANDIDATE}"
 
-"$PY" -c 'import PyInstaller' >/dev/null || {
-  echo "PyInstaller is missing; install packaging/requirements-release.txt first." >&2
-  exit 1
-}
-
 BAKED=electridrive/google_api/client_baked.json
 CHANNEL_FILE=electridrive/build_channel.txt
+PROVENANCE_FILE=electridrive/build_provenance.json
+QA_MARKER=electridrive/QA-NOT-FOR-DISTRIBUTION.txt
 BAKED_CLIENT=0
 BAKED_CREATED=0
 CHANNEL_CREATED=0
+PROVENANCE_CREATED=0
+QA_MARKER_CREATED=0
 cleanup() {
   [ "$BAKED_CREATED" -eq 0 ] || rm -f "$BAKED"
   [ "$CHANNEL_CREATED" -eq 0 ] || rm -f "$CHANNEL_FILE"
+  [ "$PROVENANCE_CREATED" -eq 0 ] || rm -f "$PROVENANCE_FILE"
+  [ "$QA_MARKER_CREATED" -eq 0 ] || rm -f "$QA_MARKER"
 }
 trap cleanup EXIT
-if [ -e "$BAKED" ] || [ -L "$BAKED" ] || [ -e "$CHANNEL_FILE" ] || [ -L "$CHANNEL_FILE" ]; then
+if [ -e "$BAKED" ] || [ -L "$BAKED" ] || [ -e "$CHANNEL_FILE" ] || [ -L "$CHANNEL_FILE" ] \
+    || [ -e "$PROVENANCE_FILE" ] || [ -L "$PROVENANCE_FILE" ] \
+    || [ -e "$QA_MARKER" ] || [ -L "$QA_MARKER" ]; then
   echo "Refusing to build with pre-existing generated OAuth or channel files." >&2
   exit 1
 fi
 if [ "$BUILD_CHANNEL" = "CI-QA" ]; then
   CHANNEL_CREATED=1
-  printf '%s\n' "$BUILD_CHANNEL" > "$CHANNEL_FILE"
+  PROVENANCE_CREATED=1
+  QA_MARKER_CREATED=1
+  "$PY" scripts/prepare_build_metadata.py
 elif [ "$BUILD_CHANNEL" = "CUSTOMER-CANDIDATE" ]; then
   if { [ -n "${ELECTRIDRIVE_CLIENT_ID:-}" ] && [ -n "${ELECTRIDRIVE_CLIENT_SECRET:-}" ]; } \
       || { [ -n "${ELECTRIDRIVE_APP_CLIENT_FILE:-}" ] && [ -f "$ELECTRIDRIVE_APP_CLIENT_FILE" ]; }; then
@@ -35,7 +40,8 @@ elif [ "$BUILD_CHANNEL" = "CUSTOMER-CANDIDATE" ]; then
     BAKED_CREATED=1
     BAKED_CLIENT=1
     CHANNEL_CREATED=1
-    printf '%s\n' "$BUILD_CHANNEL" > "$CHANNEL_FILE"
+    PROVENANCE_CREATED=1
+    "$PY" scripts/prepare_build_metadata.py
   else
     echo "Customer candidate build requires a publisher-provided OAuth Desktop client and Picker key." >&2
     exit 1
@@ -45,11 +51,19 @@ else
   exit 1
 fi
 
+"$PY" -c 'import PyInstaller' >/dev/null || {
+  echo "PyInstaller is missing; install packaging/requirements-release.txt first." >&2
+  exit 1
+}
+
 rm -rf build dist
 "$PY" -m PyInstaller --noconfirm packaging/electridrive.spec
 
 VERSION="$("$PY" -c 'from electridrive.config import APP_VERSION; print(APP_VERSION)')"
 ROOT="dist/deb/electridrive_${VERSION}_amd64"
+if [ "$BUILD_CHANNEL" = "CI-QA" ]; then
+  ROOT="dist/deb/electridrive-CI-QA_${VERSION}_amd64"
+fi
 rm -rf "$ROOT"
 mkdir -p "$ROOT/opt/electridrive" "$ROOT/usr/bin" \
          "$ROOT/usr/share/applications" \

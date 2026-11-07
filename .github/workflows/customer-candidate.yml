@@ -49,22 +49,33 @@ jobs:
           ELECTRIDRIVE_PICKER_API_KEY: ${{ secrets.ELECTRIDRIVE_PICKER_API_KEY }}
         run: |
           test -n "$ELECTRIDRIVE_APP_CLIENT_JSON"
-          test -n "$ELECTRIDRIVE_PICKER_API_KEY"
           trap 'rm -f "$ELECTRIDRIVE_APP_CLIENT_FILE"' EXIT
           printf '%s' "$ELECTRIDRIVE_APP_CLIENT_JSON" > "$ELECTRIDRIVE_APP_CLIENT_FILE"
           chmod 600 "$ELECTRIDRIVE_APP_CLIENT_FILE"
           bash scripts/build_release.sh
           test "$(dpkg-deb --field dist/electridrive_2.2.1_amd64.deb Version)" = "2.2.1"
 
-      - name: Install and launch the exact .deb and AppImage
+      - name: Verify the exact artifacts, provenance, and checksums
+        run: |
+          (cd dist && sha256sum --check SHA256SUMS.txt)
+          python scripts/verify_customer_artifact.py dist/electridrive_2.2.1_amd64.deb \
+            --expected-channel CUSTOMER-CANDIDATE --expected-revision "$GITHUB_SHA"
+          python scripts/verify_customer_artifact.py dist/ElectriDrive-x86_64.AppImage \
+            --expected-channel CUSTOMER-CANDIDATE --expected-revision "$GITHUB_SHA"
+
+      - name: Install and smoke-test the exact artifacts with a fresh profile
         run: |
           profile="$(mktemp -d)"
           mkdir -p "$profile/config" "$profile/state" "$profile/cache" "$profile/runtime"
           chmod 700 "$profile/runtime"
+          test ! -e "$profile/config/electridrive/credentials.json"
+          test ! -e "$profile/config/electridrive/app_client.json"
           sudo apt-get install -y ./dist/electridrive_2.2.1_amd64.deb
 
           XDG_CONFIG_HOME="$profile/config" XDG_STATE_HOME="$profile/state" \
-          XDG_CACHE_HOME="$profile/cache" /usr/bin/electridrive --doctor
+          XDG_CACHE_HOME="$profile/cache" /usr/bin/electridrive --doctor | tee "$profile/doctor.out"
+          grep -Fx 'OAuth client:     configured' "$profile/doctor.out"
+          grep -Fx 'Google Picker:    configured' "$profile/doctor.out"
           QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" XDG_CACHE_HOME="$profile/cache" \
           XDG_RUNTIME_DIR="$profile/runtime" timeout 5 /usr/bin/electridrive || test "$?" -eq 124
@@ -73,6 +84,8 @@ jobs:
           XDG_STATE_HOME="$profile/state" XDG_CACHE_HOME="$profile/cache" \
           XDG_RUNTIME_DIR="$profile/runtime" \
             ./dist/ElectriDrive-x86_64.AppImage --appimage-extract-and-run --doctor
+          test ! -e "$profile/config/electridrive/credentials.json"
+          test ! -e "$profile/config/electridrive/app_client.json"
           set +e
           QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" XDG_CACHE_HOME="$profile/cache" \

@@ -33,6 +33,9 @@ def main() -> int:
         except (OSError, ValueError):
             print("OAuth Desktop client JSON could not be read.", file=sys.stderr)
             return 1
+        if not isinstance(data, dict):
+            print("OAuth Desktop client JSON must be an object.", file=sys.stderr)
+            return 1
     else:
         cid = os.environ.get("ELECTRIDRIVE_CLIENT_ID")
         if not cid:
