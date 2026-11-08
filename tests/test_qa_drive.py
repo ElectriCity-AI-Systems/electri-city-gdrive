@@ -202,10 +202,18 @@ def test_customer_candidate_qa_rejects_missing_or_invalid_embedded_client(
 
 
 def test_ci_qa_still_refuses_embedded_customer_credentials(policy, monkeypatch, tmp_path):
+    import json
     from electridrive.google_api import app_client
 
+    baked = tmp_path / "must-ignore-embedded-client.json"
+    baked.write_text(
+        json.dumps({
+            "installed": {"client_id": "synthetic-embedded.apps.googleusercontent.com"},
+            "picker_api_key": "AIza" + "A" * 35,
+        }), encoding="utf-8",
+    )
     monkeypatch.setattr(app_client, "build_channel", lambda: "CI-QA")
-    monkeypatch.setattr(app_client, "_PACKAGE_FILE", tmp_path / "no-publisher-client.json")
+    monkeypatch.setattr(app_client, "_PACKAGE_FILE", baked)
     monkeypatch.setenv("ELECTRIDRIVE_CLIENT_ID", "ordinary-client")
     monkeypatch.setenv("ELECTRIDRIVE_PICKER_API_KEY", "ordinary-picker")
     assert not app_client.is_configured()
