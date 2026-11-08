@@ -125,11 +125,13 @@ def test_qa_oauth_never_uses_keyring_or_environment(policy, monkeypatch):
 
 
 def test_customer_candidate_qa_uses_validated_embedded_publisher_client(
-    policy, monkeypatch, tmp_path,
+    policy, monkeypatch, tmp_path, capsys,
 ):
     """QA must isolate tokens/Drive roots, not reject a valid public package client."""
     import json
+    from argparse import Namespace
     from electridrive.google_api import app_client, oauth
+    from electridrive.cli import cmd_doctor
 
     baked = tmp_path / "synthetic-publisher.json"
     data = {
@@ -163,6 +165,10 @@ def test_customer_candidate_qa_uses_validated_embedded_publisher_client(
     assert app_client.is_configured()
     assert app_client.is_picker_configured()
     assert oauth._try_keyring_get() is None
+    assert cmd_doctor(Namespace()) == 0
+    doctor = capsys.readouterr().out
+    assert "OAuth client:     configured" in doctor
+    assert "Google Picker:    configured" in doctor
     policy.verify()
     assert policy.remote_ids == ()
 
