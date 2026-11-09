@@ -76,6 +76,25 @@ jobs:
           XDG_CACHE_HOME="$profile/cache" /usr/bin/electridrive --doctor | tee "$profile/doctor.out"
           grep -Fx 'OAuth client:     configured' "$profile/doctor.out"
           grep -Fx 'Google Picker:    configured' "$profile/doctor.out"
+
+          # Regression gate: the exact installed packages must resolve their
+          # validated public OAuth client inside a sealed synthetic QA profile.
+          # No Google calls, ordinary tokens, or personal sync pairs are used.
+          qa_profile="$profile/qa-sealed"
+          qa_data="$profile/qa-local"
+          /usr/bin/electridrive qa-init --profile "$qa_profile" --local-root "$qa_data"
+          /usr/bin/electridrive --qa-profile "$qa_profile" doctor \
+            | tee "$profile/qa-doctor-deb.out"
+          grep -Fx 'OAuth client:     configured' "$profile/qa-doctor-deb.out"
+          grep -Fx 'Google Picker:    configured' "$profile/qa-doctor-deb.out"
+          ./dist/ElectriDrive-x86_64.AppImage --appimage-extract-and-run \
+            --qa-profile "$qa_profile" doctor | tee "$profile/qa-doctor-appimage.out"
+          grep -Fx 'OAuth client:     configured' "$profile/qa-doctor-appimage.out"
+          grep -Fx 'Google Picker:    configured' "$profile/qa-doctor-appimage.out"
+          test ! -e "$qa_profile/config/electridrive/token.json"
+          test ! -e "$qa_profile/config/electridrive/credentials.json"
+          test ! -e "$qa_profile/config/electridrive/app_client.json"
+
           QT_QPA_PLATFORM=offscreen XDG_CONFIG_HOME="$profile/config" \
           XDG_STATE_HOME="$profile/state" XDG_CACHE_HOME="$profile/cache" \
           XDG_RUNTIME_DIR="$profile/runtime" timeout 5 /usr/bin/electridrive || test "$?" -eq 124

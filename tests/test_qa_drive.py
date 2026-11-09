@@ -124,6 +124,103 @@ def test_qa_oauth_never_uses_keyring_or_environment(policy, monkeypatch):
     oauth.clear_credentials()
 
 
+def test_customer_candidate_qa_uses_validated_embedded_publisher_client(
+    policy, monkeypatch, tmp_path, capsys,
+):
+    """QA must isolate tokens/Drive roots, not reject a valid public package client."""
+    import json
+    from argparse import Namespace
+    from electridrive.google_api import app_client, oauth
+    from electridrive.cli import cmd_doctor
+
+    baked = tmp_path / "synthetic-publisher.json"
+    data = {
+        "installed": {
+            "client_id": "1234567890-abcdefghijklmnop.apps.googleusercontent.com",
+            "client_secret": "synthetic-public-desktop-secret",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "redirect_uris": ["http://localhost"],
+        },
+        "picker_api_key": "AIza" + "A" * 35,
+    }
+    baked.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(app_client, "build_channel", lambda: "CUSTOMER-CANDIDATE")
+    monkeypatch.setattr(app_client, "_PACKAGE_FILE", baked)
+    monkeypatch.setenv("ELECTRIDRIVE_CLIENT_ID", "untrusted-ordinary-client")
+    monkeypatch.setenv("ELECTRIDRIVE_PICKER_API_KEY", "untrusted-ordinary-picker")
+    monkeypatch.setattr(
+        app_client, "_user_file_data",
+        lambda: pytest.fail("QA customer client must not consult profile or ordinary clients"),
+    )
+    monkeypatch.setattr(
+        app_client, "_from_env",
+        lambda: pytest.fail("QA customer client must not consult environment credentials"),
+    )
+
+    assert app_client.client_config() == {"installed": data["installed"]}
+    assert app_client.client_id() == data["installed"]["client_id"]
+    assert app_client.picker_api_key() == data["picker_api_key"]
+    assert app_client.is_configured()
+    assert app_client.is_picker_configured()
+    assert oauth._try_keyring_get() is None
+    assert cmd_doctor(Namespace()) == 0
+    doctor = capsys.readouterr().out
+    assert "OAuth client:     configured" in doctor
+    assert "Google Picker:    configured" in doctor
+    policy.verify()
+    assert policy.remote_ids == ()
+
+
+def test_customer_candidate_qa_rejects_missing_or_invalid_embedded_client(
+    policy, monkeypatch, tmp_path,
+):
+    import json
+    from electridrive.google_api import app_client
+
+    baked = tmp_path / "synthetic-invalid-client.json"
+    monkeypatch.setattr(app_client, "build_channel", lambda: "CUSTOMER-CANDIDATE")
+    monkeypatch.setattr(app_client, "_PACKAGE_FILE", baked)
+    monkeypatch.setattr(
+        app_client, "_user_file_data",
+        lambda: pytest.fail("Missing customer package must not fall back to profile"),
+    )
+    with pytest.raises(ValueError, match="unavailable"):
+        app_client.client_config()
+    with pytest.raises(ValueError, match="unavailable"):
+        app_client.picker_api_key()
+
+    baked.write_text(json.dumps({"installed": {"client_id": "REPLACE_WITH_YOUR_CLIENT_ID"},
+                                 "picker_api_key": "REPLACE_WITH_YOUR_PICKER_API_KEY"}),
+                     encoding="utf-8")
+    with pytest.raises(ValueError, match="placeholder"):
+        app_client.client_config()
+    with pytest.raises(ValueError, match="placeholder"):
+        app_client.picker_api_key()
+    policy.verify()
+
+
+def test_ci_qa_still_refuses_embedded_customer_credentials(policy, monkeypatch, tmp_path):
+    import json
+    from electridrive.google_api import app_client
+
+    baked = tmp_path / "must-ignore-embedded-client.json"
+    baked.write_text(
+        json.dumps({
+            "installed": {"client_id": "synthetic-embedded.apps.googleusercontent.com"},
+            "picker_api_key": "AIza" + "A" * 35,
+        }), encoding="utf-8",
+    )
+    monkeypatch.setattr(app_client, "build_channel", lambda: "CI-QA")
+    monkeypatch.setattr(app_client, "_PACKAGE_FILE", baked)
+    monkeypatch.setenv("ELECTRIDRIVE_CLIENT_ID", "ordinary-client")
+    monkeypatch.setenv("ELECTRIDRIVE_PICKER_API_KEY", "ordinary-picker")
+    assert not app_client.is_configured()
+    assert not app_client.is_picker_configured()
+    policy.verify()
+
+
 def test_qa_oauth_token_symlink_is_refused(policy, tmp_path):
     from electridrive.google_api import oauth
     from electridrive.config import get_paths

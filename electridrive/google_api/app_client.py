@@ -8,8 +8,10 @@ Customer candidate packages use their validated embedded publisher client and
 Picker key before any profile files or environment overrides. Other builds use
 profile/environment client configuration and then the placeholder below.
 
-The same resolver is used by desktop login and Picker. QA mode permits only
-checked profile client files and the unconfigured placeholder.
+The same resolver is used by desktop login and Picker. Sealed QA profiles in a
+validated CUSTOMER-CANDIDATE package may use its embedded *public* publisher
+client for login, while tokens, sync roots and cloud writes remain QA-confined.
+CI-QA builds and source checkouts do not inherit ordinary client settings.
 """
 from __future__ import annotations
 
@@ -82,7 +84,19 @@ def _package_data() -> dict[str, Any] | None:
 
 
 def _is_customer_package() -> bool:
-    return not current_policy() and build_channel() == "CUSTOMER-CANDIDATE"
+    # QA isolation restricts tokens, local paths and Drive roots, not the public
+    # Desktop OAuth client embedded in a validated customer-candidate package.
+    return build_channel() == "CUSTOMER-CANDIDATE"
+
+
+def _validated_customer_package_data() -> dict[str, Any]:
+    data = _package_data()
+    if data is None:
+        raise ValueError("Publisher-configured OAuth client is unavailable in this package.")
+    from electridrive.google_api.release_config import validate_customer_config
+
+    validate_customer_config(data)
+    return data
 
 
 def _config_from(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -99,13 +113,7 @@ def _config_from(data: dict[str, Any] | None) -> dict[str, Any] | None:
 def client_config() -> dict[str, Any]:
     """Use one selected Desktop client for both login and Picker."""
     if _is_customer_package():
-        data = _package_data()
-        if data is None:
-            raise ValueError("Publisher-configured OAuth client is unavailable in this package.")
-        from electridrive.google_api.release_config import validate_customer_config
-
-        validate_customer_config(data)
-        config = _config_from(data)
+        config = _config_from(_validated_customer_package_data())
         if config is None:
             raise ValueError("Publisher-configured OAuth client is invalid.")
         return config
@@ -129,11 +137,13 @@ def client_id() -> str:
 
 
 def picker_api_key() -> str:
+    if _is_customer_package():
+        # Match the login resolver even in sealed QA mode. A malformed/missing
+        # embedded package must fail closed rather than falling back to users'
+        # ordinary settings or environment variables.
+        return str(_validated_customer_package_data()["picker_api_key"])
     if current_policy():
         data = _user_file_data() or {}
-        return str(data.get("picker_api_key", BUNDLED_PICKER_API_KEY))
-    if _is_customer_package():
-        data = _package_data() or {}
         return str(data.get("picker_api_key", BUNDLED_PICKER_API_KEY))
     env = os.environ.get("ELECTRIDRIVE_PICKER_API_KEY")
     if env:
