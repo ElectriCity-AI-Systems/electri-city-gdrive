@@ -185,6 +185,7 @@ def test_latest_wins_two_way_opt_in_requires_confirmation_and_no_sync(
                             lambda *a, **k: QMessageBox.Yes)
         view._toggle_latest_wins(0)
         assert pair.latest_wins
+        assert pair.delete_policy == "off"
         assert saved == [True] and session.submitted == []
         view._toggle_latest_wins(0)
         assert not pair.latest_wins
