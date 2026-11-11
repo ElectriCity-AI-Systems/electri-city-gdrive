@@ -549,6 +549,9 @@ class SyncView(QWidget):
             ) != QMessageBox.Yes:
                 return
         pair.latest_wins = enable
+        if enable:
+            # Latest-wins is about updating content, never propagating deletions.
+            pair.delete_policy = "off"
         self._session.save()
         self._reload()
 
