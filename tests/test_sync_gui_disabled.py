@@ -150,9 +150,12 @@ def test_auto_newest_not_offered_for_two_way_or_during_sync(qapp, tmp_path):
         assert len(auto_buttons) == 1
         assert auto_buttons[0].text() == "Auto newest: OFF"
         view._sync_busy = True
+        view._reload()
         view._toggle_auto_newest_duplicate(0)
         assert not up.auto_select_newest_duplicate
-        assert not auto_buttons[0].isEnabled()
+        fresh = [b for b in view.findChildren(QPushButton)
+                 if b.objectName() == "AutoNewestDuplicate" and b.isVisibleTo(view)]
+        assert len(fresh) == 1 and not fresh[0].isEnabled()
         assert session.submitted == []
     finally:
         _dispose(view, qapp)
