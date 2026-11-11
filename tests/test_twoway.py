@@ -911,6 +911,56 @@ def test_two_way_latest_wins_resolves_two_sided_changes_without_extra_copy():
     assert len(actions) == 1 and actions[0].kind == ActionKind.CONFLICT
 
 
+def test_two_way_latest_wins_remote_only_duplicates_download_verified_newest(tmp_path: Path):
+    root = tmp_path / "new-downloads"
+    root.mkdir()
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("remote-only.txt", b"stale cloud",
+                          parent=folder, modified=_utc_stamp(50))
+    newest = fake.add_file("remote-only.txt", b"latest cloud",
+                           parent=folder, modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == 0 and result.downloaded == 1
+        assert result.auto_selected_duplicates == 1
+        assert result.updated_duplicate_files == 1
+        assert (root / "remote-only.txt").read_bytes() == b"latest cloud"
+        assert fake.nodes[older]["content"] == b"latest cloud"
+        assert fake.nodes[newest]["content"] == b"latest cloud"
+        assert fake.updates[0][0] == older
+        assert not fake.uploads
+        assert not fake.nodes[older]["trashed"]
+    finally:
+        db.close()
+
+
+def test_two_way_latest_wins_remote_only_tied_duplicates_block(tmp_path: Path):
+    root = tmp_path / "new-downloads"
+    root.mkdir()
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("remote-only.txt", b"version A",
+                          parent=folder, modified=_utc_stamp(30))
+    newer = fake.add_file("remote-only.txt", b"version B",
+                          parent=folder, modified=fake.nodes[older]["modified"])
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed >= 1 and result.blocked_before_transfers
+        assert not (root / "remote-only.txt").exists()
+        assert not fake.updates and not fake.uploads
+        assert fake.nodes[older]["content"] == b"version A"
+        assert fake.nodes[newer]["content"] == b"version B"
+    finally:
+        db.close()
+
+
 def test_latest_wins_unique_cloud_file_overwrites_older_local(tmp_path: Path):
     root = tmp_path / "downloads"
     root.mkdir()
