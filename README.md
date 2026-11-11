@@ -197,24 +197,37 @@ default. An explicit `SyncRules()` object or
 `SyncPair(include_all_files=False)` provides compatibility for workflows
 that intentionally exclude build files.
 
-**Do not enable the three existing personal pairs until the source tree is
-preflighted.** Their Google Drive destinations contain known same-name
-duplicate objects; any ambiguous upload target must remain blocked until
-a canonical Drive ID is safely confirmed. No automatic rename/delete is
-performed. Existing disabled pair settings remain disabled.
+**Preflight existing personal pairs before enabling them.** Known same-name
+duplicates are automatically matched only under the strict Upload-only
+safeguards below. Otherwise, unknown identities remain blocked for owner review.
+No automatic rename/delete is performed. Existing disabled pairs stay disabled.
 
 ### Complete selected trees
 
 **Upload-only duplicate-name handling.** Google Drive permits multiple
-distinct files with the same name in one folder. An upload-only pair ignores
-such duplicates **only when the ambiguous remote path is absent locally**;
-it never downloads, replaces, or trashes those remote-only files. When an
-ambiguous path exists locally, an upload proceeds only if previously saved
-sync history identifies one exact canonical Drive ID. Otherwise the pair
-fails closed, without uploading or overwriting an arbitrarily chosen file.
-Two-way/download-only modes retain strict ambiguity failures. Resolve
-ambiguous names manually after inspecting contents and Drive IDs—never
-automatically delete duplicate documents.
+different files with an identical name under one parent folder. An upload-only
+pair ignores duplicated **remote-only** paths; it never downloads or deletes
+those objects. For a path that also exists locally, a previously recorded or
+owner-reviewed canonical Drive ID always wins.
+
+Without any earlier binding, Upload-only may automatically select the **single
+most recently modified** duplicate only when the local file is strictly newer
+(by more than two seconds), the winner is unambiguous (over one second ahead
+of the next candidate), all candidates are ordinary binary files with
+verifiable checksums, and their exact names, parent IDs, sizes, timestamps
+and contents' MD5 values match a fresh Drive metadata check. It refuses
+stale, invalid, future-dated or indistinguishable candidates, including when
+the local bytes match an older duplicate. Immediately before updating,
+ElectriDrive revalidates the selected local bytes and **all** duplicate
+metadata. If anything changed, that upload fails without overwriting Drive.
+The update preserves the selected Drive ID and the other original files.
+A successful upload records the canonical ID for subsequent runs.
+
+The safeguards do not guarantee detection of an edit that races after the
+final metadata check; users should avoid simultaneous edits during the first
+adoption. **Two-way and download-only always retain strict duplicate
+blocking.** Unsafe situations require explicit review; duplicate files are
+never automatically renamed, moved or deleted.
 
 Each enabled sync pair is an independent scope boundary. ElectriDrive inventories included
 files **and directories** recursively, mirrors empty and nested-empty directory trees, and
