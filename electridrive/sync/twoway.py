@@ -1565,7 +1565,9 @@ class TwoWaySyncEngine:
                 # This may be a locally disambiguated collision path.  Update
                 # media only so the original Drive name and parent stay intact.
                 existing = self._confirm_upload_target(rel, existing)
-                if existing.file_id == remote[rel].file_id:
+                if self.pair.latest_wins and self.pair.direction == "two_way":
+                    if existing.file_id != remote[rel].file_id:
+                        raise RuntimeError("Drive target identity changed; explicit review required")
                     self._verify_latest_pair_before_write(rel, L, remote[rel])
                 self._recheck_auto_update(rel, existing.file_id)
                 self._upload(rel, "", existing)
