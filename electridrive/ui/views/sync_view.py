@@ -198,6 +198,16 @@ class SyncView(QWidget):
             auto.setEnabled(not self._sync_busy)
             auto.clicked.connect(lambda: self._toggle_auto_newest_duplicate(index))
             options.addWidget(auto)
+            switch = QPushButton("Use two-way Latest wins")
+            switch.setObjectName("EnableTwoWayLatest")
+            switch.setProperty("ghost", True)
+            switch.setToolTip(
+                "Explicitly switch this Upload-only pair to two-way Latest "
+                "wins. This permits downloads of remote-only and newer files."
+            )
+            switch.setEnabled(not self._sync_busy)
+            switch.clicked.connect(lambda: self._enable_two_way_latest(index))
+            options.addWidget(switch)
         elif pair.direction == "two_way":
             latest = QPushButton(
                 "Latest wins: ON" if pair.latest_wins else "Latest wins: OFF"
@@ -486,6 +496,34 @@ class SyncView(QWidget):
             if other_remote == canonical_remote:
                 return True
         return False
+
+    def _enable_two_way_latest(self, index: int):
+        pairs = self._session.settings.sync_pairs
+        if not (0 <= index < len(pairs)) or self._sync_busy:
+            return
+        pair = pairs[index]
+        if pair.direction != "up_only":
+            return
+        message = (
+            "Change this Upload-only pair to TWO-WAY Latest wins?\\n\\n"
+            "ElectriDrive will be authorized to download newer and remote-only "
+            "files into the local folder, and to update outdated files in Drive. "
+            "Same-name Drive duplicates may all be media-updated; "
+            "no Drive file will be deleted by this mode.\\n\\n"
+            "Deletion propagation will be disabled. Existing folder mappings "
+            "are preserved. This change will NOT start synchronization. "
+            "Verify backups and test with disposable files first."
+        )
+        if QMessageBox.question(
+            self, "Convert pair to two-way Latest wins?", message
+        ) != QMessageBox.Yes:
+            return
+        pair.direction = "two_way"
+        pair.delete_policy = "off"
+        pair.latest_wins = True
+        pair.auto_select_newest_duplicate = False
+        self._session.save()
+        self._reload()
 
     def _toggle_latest_wins(self, index: int):
         pairs = self._session.settings.sync_pairs
