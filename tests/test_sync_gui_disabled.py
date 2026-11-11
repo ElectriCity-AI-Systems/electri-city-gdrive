@@ -101,6 +101,63 @@ def test_enabled_pair_still_has_actionable_sync_button(qapp, tmp_path):
         _dispose(view, qapp)
 
 
+def test_auto_newest_toggle_requires_consent_and_never_starts_sync(
+    qapp, tmp_path, monkeypatch,
+):
+    pair = SyncPair(
+        str(tmp_path / "Documents"), "ElectriDrive/Documents",
+        direction="up_only", enabled=True,
+    )
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    try:
+        buttons = lambda: [
+            b for b in view.findChildren(QPushButton)
+            if b.objectName() == "AutoNewestDuplicate" and b.isVisibleTo(view)
+        ]
+        assert len(buttons()) == 1
+        assert buttons()[0].text() == "Auto newest: OFF"
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *args, **kwargs: QMessageBox.No)
+        view._toggle_auto_newest_duplicate(0)
+        assert not pair.auto_select_newest_duplicate
+        assert saved == [] and session.submitted == []
+
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *args, **kwargs: QMessageBox.Yes)
+        view._toggle_auto_newest_duplicate(0)
+        assert pair.auto_select_newest_duplicate
+        assert saved == [True] and session.submitted == []
+
+        # The same owner can turn the behavior off without another write.
+        view._toggle_auto_newest_duplicate(0)
+        assert not pair.auto_select_newest_duplicate
+        assert saved == [True, True] and session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
+def test_auto_newest_not_offered_for_two_way_or_during_sync(qapp, tmp_path):
+    up = SyncPair(str(tmp_path / "up"), "ElectriDrive/Up", direction="up_only")
+    two_way = SyncPair(str(tmp_path / "two"), "ElectriDrive/Two", direction="two_way")
+    session = FakeSession([up, two_way])
+    view = SyncView(session, get_palette("electric_dark"))
+    try:
+        auto_buttons = [b for b in view.findChildren(QPushButton)
+                        if b.objectName() == "AutoNewestDuplicate"]
+        assert len(auto_buttons) == 1
+        assert auto_buttons[0].text() == "Auto newest: OFF"
+        view._sync_busy = True
+        view._toggle_auto_newest_duplicate(0)
+        assert not up.auto_select_newest_duplicate
+        assert not auto_buttons[0].isEnabled()
+        assert session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
 def test_gui_new_pair_starts_disabled_and_requires_explicit_enable(
     qapp, tmp_path, monkeypatch,
 ):
