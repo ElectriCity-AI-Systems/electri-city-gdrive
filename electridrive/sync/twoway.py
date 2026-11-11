@@ -400,7 +400,7 @@ class TwoWaySyncEngine:
         # Retain all IDs so upload-only can reject ambiguous write targets.
         self._duplicate_remote_ids: dict[str, set[str]] = {}
         self._duplicate_remote_entries: dict[str, dict[str, RemoteEntry]] = {}
-        self._auto_update_guards: dict[str, tuple[LocalEntry, dict[str, tuple], str]] = {}
+        self._auto_update_guards: dict[str, tuple[LocalEntry | None, dict[str, tuple], str]] = {}
         self._path_conflict_candidates: dict[
             str, dict[str, RemotePathCandidate]
         ] = {}
@@ -685,11 +685,11 @@ class TwoWaySyncEngine:
     def _auto_select_newest_duplicate(
         self,
         rel: str,
-        local: LocalEntry,
+        local: LocalEntry | None,
         remote: dict[str, RemoteEntry],
         last: dict[str, LastEntry],
     ) -> bool:
-        """Upload-only: use the newest *unambiguously identified* binary Drive ID.
+        """Select newest binary Drive ID for an explicitly opted-in sync pair.
 
         Only a strictly newer local file authorizes this one-time adoption. A
         previous sync binding, owner-reviewed ID, ties, unsafe names or missing
@@ -723,16 +723,21 @@ class TwoWaySyncEngine:
         # Allow a margin for timestamp precision and clock differences.
         if sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1:
             return False
-        source = _strict_newest_side(local, candidates[newest_id])
-        if source is None or (self.pair.direction == "up_only" and source != "local"):
-            return False
-        # A local byte-for-byte match to *another* duplicate is ambiguous:
-        # it may indicate an intentionally different history, not an update.
-        if (source == "local" and any(
+        if local is None:
+            if self.pair.direction != "two_way":
+                return False
+            source = "remote"
+        else:
+            source = _strict_newest_side(local, candidates[newest_id])
+            if source is None or (self.pair.direction == "up_only" and source != "local"):
+                return False
+            # If the local version matches an *older* candidate, adopting
+            # another Drive ID as an upload target is not a safe assumption.
+            if source == "local" and any(
                 entry.md5 == local.md5 for fid, entry in candidates.items()
                 if fid != newest_id
-        )):
-            return False
+            ):
+                return False
 
         verified = {}
         for fid, entry in sorted(candidates.items()):
@@ -803,11 +808,12 @@ class TwoWaySyncEngine:
         local, verified, _source = self._auto_update_guards[rel]
         if chosen_id != self._canonical_ids.get(rel) or chosen_id not in verified:
             raise RuntimeError("Auto-selected Drive target changed; refusing update")
-        with opened_source(self.local_root, rel) as source:
-            st = source.stat()
-            if ((st.st_mtime_ns, st.st_size) != (local.mtime_ns, local.size)
-                    or md5_file(source) != local.md5):
-                raise RuntimeError("Local file changed after duplicate review; refusing update")
+        if local is not None:
+            with opened_source(self.local_root, rel) as source:
+                st = source.stat()
+                if ((st.st_mtime_ns, st.st_size) != (local.mtime_ns, local.size)
+                        or md5_file(source) != local.md5):
+                    raise RuntimeError("Local file changed after duplicate review; refusing update")
         for fid, expected in sorted(verified.items()):
             self._check_cancel()
             meta = self.client.get_metadata(fid)
@@ -858,6 +864,7 @@ class TwoWaySyncEngine:
             stat = data.stat()
             md5 = md5_file(data)
             if source == "local" and (
+                before_local is None or
                 (stat.st_mtime_ns, stat.st_size) !=
                 (before_local.mtime_ns, before_local.size)
                 or md5 != before_local.md5
@@ -1275,7 +1282,7 @@ class TwoWaySyncEngine:
             self.pair.direction == "two_way" and self.pair.latest_wins
         ):
             for rel, candidate_ids in sorted(self._duplicate_remote_ids.items()):
-                if rel not in local:
+                if rel not in local and self.pair.direction == "up_only":
                     # Upload-only never touches this remote-only path.
                     continue
                 preferred = self._canonical_ids.get(rel)
@@ -1285,7 +1292,7 @@ class TwoWaySyncEngine:
                     # A unique newest binary file may be adopted only when the
                     # local content is strictly newer than *all* duplicates.
                     # All other originals are preserved under their Drive IDs.
-                    if self._auto_select_newest_duplicate(rel, local[rel], remote, last):
+                    if self._auto_select_newest_duplicate(rel, local.get(rel), remote, last):
                         report.auto_selected_duplicates += 1
                         self._log("Latest-wins: newest duplicate Drive ID selected; "
                                   "older Drive IDs will be updated in place")
