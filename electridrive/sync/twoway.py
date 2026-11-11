@@ -727,8 +727,10 @@ class TwoWaySyncEngine:
             return False
         # A local byte-for-byte match to *another* duplicate is ambiguous:
         # it may indicate an intentionally different history, not an update.
-        if any(entry.md5 == local.md5 for fid, entry in candidates.items()
-               if fid != newest_id):
+        if (source == "local" and any(
+                entry.md5 == local.md5 for fid, entry in candidates.items()
+                if fid != newest_id
+        )):
             return False
 
         verified = {}
@@ -856,6 +858,7 @@ class TwoWaySyncEngine:
                         or before_stat.st_mtime_ns != stat.st_mtime_ns
                         or md5_file(handle) != md5):
                     raise RuntimeError("Local source changed during duplicate convergence")
+                self._invalidate_remote_snapshot()
                 result_id = updater(fid, handle, progress_cb=self._check_cancel)
             if result_id != fid:
                 raise RuntimeError("Drive update changed duplicate identity")
