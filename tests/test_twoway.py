@@ -581,10 +581,11 @@ def test_up_only_auto_updates_unique_newest_duplicate_when_local_is_newer(tmp_pa
         assert result.trashed_remote == result.trashed_local == 0
         assert result.remote_path_conflicts[0].resolved
         assert result.remote_path_conflicts[0].canonical_id == newest
-        assert fake.updates == [(newest, str(local), None)]
+        assert fake.updates == [(newest, str(local), None), (older, str(local), None)]
+        assert result.updated_duplicate_files == 1
         assert not fake.uploads
         assert fake.nodes[newest]["content"] == b"latest local document"
-        assert fake.nodes[older]["content"] == b"old original"
+        assert fake.nodes[older]["content"] == b"latest local document"
         assert not fake.nodes[older]["trashed"]
         assert db.get_sync_item(engine.pair_id, "hetzner2026.odt").remote_id == newest
 
@@ -725,8 +726,8 @@ def test_up_only_auto_selects_after_full_paginated_duplicate_scan(tmp_path: Path
             fake, db, SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only", auto_select_newest_duplicate=True)
         ).run()
         assert result.failed == 0 and result.uploaded == 1
-        assert fake.updates == [(newest, str(local), None)]
-        assert fake.nodes[older]["content"] == b"old"
+        assert fake.updates == [(newest, str(local), None), (older, str(local), None)]
+        assert fake.nodes[older]["content"] == b"new local"
     finally:
         db.close()
 
@@ -760,8 +761,8 @@ def test_auto_newest_duplicates_is_opt_in_and_serialized(tmp_path: Path):
         assert persisted.sync_pairs[0].auto_select_newest_duplicate
         successful = TwoWaySyncEngine(fake, db, persisted.sync_pairs[0]).run()
         assert successful.failed == 0 and successful.uploaded == 1
-        assert fake.updates[0][0] == second
-        assert fake.nodes[first]["content"] == b"older"
+        assert [item[0] for item in fake.updates] == [second, first]
+        assert fake.nodes[first]["content"] == b"latest local"
     finally:
         db.close()
 
@@ -789,6 +790,139 @@ def test_existing_owner_selection_is_never_replaced_by_newest_heuristic(tmp_path
         assert fake.updates == [(chosen_older, str(local), None)]
         assert fake.nodes[chosen_older]["content"] == b"latest local"
         assert fake.nodes[unselected_newer]["content"] == b"newer unselected"
+    finally:
+        db.close()
+
+
+def test_latest_wins_two_way_upload_overwrites_old_cloud_without_conflict(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"current local")
+    _set_local_age(local, 1)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    first = fake.add_file("same.txt", b"stale oldest", parent=folder,
+                          modified=_utc_stamp(50))
+    second = fake.add_file("same.txt", b"stale newer", parent=folder,
+                           modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed == 0
+        assert report.uploaded == 1 and report.updated_duplicate_files == 1
+        assert report.conflicts == 0
+        assert not fake.uploads
+        assert [x[0] for x in fake.updates] == [second, first]
+        assert fake.nodes[first]["content"] == b"current local"
+        assert fake.nodes[second]["content"] == b"current local"
+        assert not list(root.glob("*conflict*"))
+    finally:
+        db.close()
+
+
+def test_latest_wins_two_way_download_overwrites_old_local_and_old_cloud(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"stale local")
+    _set_local_age(local, 55)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("same.txt", b"stale cloud", parent=folder,
+                          modified=_utc_stamp(50))
+    newest = fake.add_file("same.txt", b"current cloud", parent=folder,
+                           modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed == 0
+        assert report.downloaded == 1 and report.updated_duplicate_files == 1
+        assert report.conflicts == 0 and not fake.uploads
+        assert local.read_bytes() == b"current cloud"
+        assert fake.nodes[older]["content"] == b"current cloud"
+        assert fake.nodes[newest]["content"] == b"current cloud"
+        assert [x[0] for x in fake.updates] == [older]
+        # Old local data is recoverable, but not a second active sync file.
+        assert list((root / ".electridrive-trash" / "overwritten").rglob("same.txt"))
+        assert not list(root.glob("*conflict*"))
+    finally:
+        db.close()
+
+
+def test_latest_wins_unique_cloud_file_overwrites_older_local(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"stale local")
+    _set_local_age(local, 30)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    remote = fake.add_file("same.txt", b"current cloud",
+                           parent=folder, modified=_utc_stamp(1))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        # First adoption of a single existing remote object still needs an
+        # explicit identity choice. Do not defeat the existing mapping guard.
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True,
+                        canonical_remote_ids={"same.txt": remote})
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == 0 and result.downloaded == 1
+        assert local.read_bytes() == b"current cloud"
+        assert not fake.updates and not fake.uploads
+        assert not list(root.glob("*conflict*"))
+    finally:
+        db.close()
+
+
+def test_latest_wins_ambiguous_timestamps_fail_without_touching_files(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"local")
+    stamp = datetime.now(timezone.utc).timestamp() - 100
+    os.utime(local, (stamp, stamp))
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    remote = fake.add_file("same.txt", b"cloud", parent=folder,
+                           modified=datetime.fromtimestamp(stamp, timezone.utc).isoformat())
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True,
+                        canonical_remote_ids={"same.txt": remote})
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed and result.blocked_before_transfers
+        assert local.read_bytes() == b"local"
+        assert not fake.updates and not fake.uploads
+        assert not list(root.glob("*conflict*"))
+    finally:
+        db.close()
+
+
+def test_latest_wins_opt_out_keeps_legacy_conflict_copies(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"local-new")
+    _set_local_age(local, 1)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    remote = fake.add_file("same.txt", b"remote-old", parent=folder,
+                           modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=False,
+                        canonical_remote_ids={"same.txt": remote})
+        report = TwoWaySyncEngine(fake, db, pair).run()
+        assert report.failed == 0 and report.conflicts == 1
+        assert list(root.glob("*conflict*"))
     finally:
         db.close()
 
