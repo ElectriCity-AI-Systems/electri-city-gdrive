@@ -160,6 +160,21 @@ def _strict_timestamp(value: str | None) -> float | None:
         return None
 
 
+def _strict_newest_side(local: LocalEntry, remote: RemoteEntry) -> str | None:
+    """Return the sole newest version, else require review before any write."""
+    remote_time = _strict_timestamp(remote.modified)
+    local_time = local.mtime_ns / 1e9
+    if (remote_time is None or not math.isfinite(local_time)
+            or local_time > datetime.now(timezone.utc).timestamp() + 300):
+        return None
+    delta = local_time - remote_time
+    if delta > 2.0:
+        return "local"
+    if delta < -2.0:
+        return "remote"
+    return None
+
+
 def reconcile(
     local: dict[str, LocalEntry],
     remote: dict[str, RemoteEntry],
@@ -167,6 +182,7 @@ def reconcile(
     *,
     direction: str = "two_way",
     delete_policy: str = "trash",
+    latest_wins: bool = False,
 ) -> list[Action]:
     """Pure 3-way reconciliation. Returns an ordered list of actions to apply."""
     actions: list[Action] = []
@@ -204,6 +220,17 @@ def reconcile(
             continue
 
         if L and R:
+            if latest_wins and direction == "two_way" and not R.is_google_doc and L.md5 != R.md5:
+                winner = _strict_newest_side(L, R)
+                if winner is None:
+                    # Caller preflights this before any remote/local transfer.
+                    actions.append(Action(ActionKind.CONFLICT, rel, "ambiguous"))
+                else:
+                    actions.append(Action(
+                        ActionKind.UPLOAD if winner == "local" else ActionKind.DOWNLOAD,
+                        rel,
+                    ))
+                continue
             if L.md5 == R.md5:
                 if S is None or S.local_md5 != L.md5 or S.remote_md5 != R.md5:
                     actions.append(Action(ActionKind.RECORD, rel))
@@ -371,7 +398,7 @@ class TwoWaySyncEngine:
         # Retain all IDs so upload-only can reject ambiguous write targets.
         self._duplicate_remote_ids: dict[str, set[str]] = {}
         self._duplicate_remote_entries: dict[str, dict[str, RemoteEntry]] = {}
-        self._auto_update_guards: dict[str, tuple[LocalEntry, dict[str, tuple]]] = {}
+        self._auto_update_guards: dict[str, tuple[LocalEntry, dict[str, tuple], str]] = {}
         self._path_conflict_candidates: dict[
             str, dict[str, RemotePathCandidate]
         ] = {}
@@ -576,7 +603,9 @@ class TwoWaySyncEngine:
                 self._candidate_from_entry(candidate),
             )
             self._duplicate_file_paths.add(candidate.rel)
-            if self.pair.direction == "up_only":
+            if self.pair.direction == "up_only" or (
+                self.pair.direction == "two_way" and self.pair.latest_wins
+            ):
                 # Remote-only objects will never be downloaded, updated or
                 # trashed in upload-only mode. Track ambiguous IDs rather than
                 # blocking unrelated local uploads. Validate every local upload
@@ -665,8 +694,10 @@ class TwoWaySyncEngine:
         checksums always take precedence over an automatic choice. Every
         candidate is freshly checked against the completed cloud inventory.
         """
-        if (self.pair.direction != "up_only"
-                or self.pair.auto_select_newest_duplicate is not True or rel in last
+        if (not (self.pair.direction == "up_only"
+                  and self.pair.auto_select_newest_duplicate is True
+                  or self.pair.direction == "two_way"
+                  and self.pair.latest_wins is True) or rel in last
                 or rel in self.pair.canonical_remote_ids
                 or rel in self._canonical_ids or self._remote_scan_errors):
             return False
@@ -688,9 +719,10 @@ class TwoWaySyncEngine:
         newest_id = max(timestamps, key=timestamps.get)
         newest_stamp = timestamps[newest_id]
         # Allow a margin for timestamp precision and clock differences.
-        if (sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1
-                or local.mtime_ns / 1e9 <= newest_stamp + 2.0
-                or local.mtime_ns / 1e9 > datetime.now(timezone.utc).timestamp() + 300):
+        if sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1:
+            return False
+        source = _strict_newest_side(local, candidates[newest_id])
+        if source is None or (self.pair.direction == "up_only" and source != "local"):
             return False
         # A local byte-for-byte match to *another* duplicate is ambiguous:
         # it may indicate an intentionally different history, not an update.
@@ -718,14 +750,14 @@ class TwoWaySyncEngine:
 
         self._canonical_ids[rel] = newest_id
         remote[rel] = candidates[newest_id]
-        self._auto_update_guards[rel] = (local, verified)
+        self._auto_update_guards[rel] = (local, verified, source)
         return True
 
     def _recheck_auto_update(self, rel: str, chosen_id: str) -> None:
         """Re-check all duplicate identities and the local bytes before a write."""
         if rel not in self._auto_update_guards:
             return
-        local, verified = self._auto_update_guards[rel]
+        local, verified, _source = self._auto_update_guards[rel]
         if chosen_id != self._canonical_ids.get(rel) or chosen_id not in verified:
             raise RuntimeError("Auto-selected Drive target changed; refusing update")
         with opened_source(self.local_root, rel) as source:
@@ -1100,7 +1132,9 @@ class TwoWaySyncEngine:
         report.scanned_remote_folders = len(self._remote_dirs)
         report.excluded_remote = self._remote_excluded
 
-        if self.pair.direction != "up_only":
+        if self.pair.direction == "down_only" or (
+            self.pair.direction == "two_way" and not self.pair.latest_wins
+        ):
             for rel in sorted(self._duplicate_file_paths):
                 candidates = self._path_conflict_candidates.get(rel, {})
                 preferred = self._canonical_ids.get(rel)
@@ -1111,7 +1145,9 @@ class TwoWaySyncEngine:
                 ):
                     self._remote_scan_errors.append("duplicate remote file path")
 
-        if self.pair.direction == "up_only":
+        if self.pair.direction == "up_only" or (
+            self.pair.direction == "two_way" and self.pair.latest_wins
+        ):
             for rel, candidate_ids in sorted(self._duplicate_remote_ids.items()):
                 if rel not in local:
                     # Upload-only never touches this remote-only path.
@@ -1125,8 +1161,8 @@ class TwoWaySyncEngine:
                     # All other originals are preserved under their Drive IDs.
                     if self._auto_select_newest_duplicate(rel, local[rel], remote, last):
                         report.auto_selected_duplicates += 1
-                        self._log("Upload-only: newest duplicate Drive ID selected; "
-                                  "other Drive originals remain unchanged")
+                        self._log("Latest-wins: newest duplicate Drive ID selected; "
+                                  "older Drive IDs will be updated in place")
                     else:
                         self._remote_scan_errors.append(
                             "ambiguous upload target: duplicate remote file path"
@@ -1181,11 +1217,21 @@ class TwoWaySyncEngine:
         # Use the same included inventory for convergence and completeness.
         self._local_dirs = {rel for rel in self._local_dirs if not self._excluded(rel)}
         self._remote_dirs = {rel for rel in self._remote_dirs if not self._excluded(rel)}
+        # Latest-wins is a strict opt-in. Ambiguous clocks must never trigger
+        # conflict-copy creation or implicit overwrites.
+        if self.pair.latest_wins and self.pair.direction == "two_way":
+            for rel in sorted(set(local) & set(remote)):
+                if (local[rel].md5 != remote[rel].md5
+                        and not remote[rel].is_google_doc
+                        and _strict_newest_side(local[rel], remote[rel]) is None):
+                    self._report_failure(report, "latest-wins timestamp ambiguous: " + rel)
+                    return report
         report.blocked_before_transfers = False
         self._sync_directories(report)
         actions = reconcile(local, remote, last,
                             direction=self.pair.direction,
-                            delete_policy=self.pair.delete_policy)
+                            delete_policy=self.pair.delete_policy,
+                            latest_wins=self.pair.latest_wins)
         self._log(f"Sync {self.local_root} <-> {self.pair.remote_folder}: "
                   f"{len(actions)} action(s)")
         for a in actions:
