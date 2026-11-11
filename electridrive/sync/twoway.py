@@ -165,8 +165,9 @@ def _strict_newest_side(local: LocalEntry, remote: RemoteEntry) -> str | None:
     """Return the sole newest version, else require review before any write."""
     remote_time = _strict_timestamp(remote.modified)
     local_time = local.mtime_ns / 1e9
+    now = datetime.now(timezone.utc).timestamp()
     if (remote_time is None or not math.isfinite(local_time)
-            or local_time > datetime.now(timezone.utc).timestamp() + 300):
+            or local_time > now + 300 or remote_time > now + 300):
         return None
     delta = local_time - remote_time
     if delta > 2.0:
