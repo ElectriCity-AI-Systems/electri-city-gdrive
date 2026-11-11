@@ -148,6 +148,9 @@ class SyncPair:
     # Explicit opt-in: only a strictly newer local Upload-only file may update
     # the single newest existing Drive duplicate. Other candidates stay intact.
     auto_select_newest_duplicate: bool = False
+    # Explicit two-way opt-in: an unambiguous timestamp winner replaces the
+    # older counterpart without creating a second conflict copy.
+    latest_wins: bool = False
 
 
 @dataclass
