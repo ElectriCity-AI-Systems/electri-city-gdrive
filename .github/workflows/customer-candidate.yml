@@ -24,6 +24,7 @@ jobs:
 
       - name: Install runtime verification tools
         run: |
+          bash scripts/ci_apt_mirror_guard.sh
           sudo apt-get update
           sudo apt-get install -y binutils dbus-x11 desktop-file-utils libasound2 libbrotli1 \
             libcups2 libdbus-1-3 libegl1 libfuse2 fuse3 libfontconfig1 libfreetype6 \
