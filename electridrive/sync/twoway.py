@@ -120,6 +120,7 @@ class SyncReport:
     excluded_remote: int = 0
     uploaded: int = 0
     auto_selected_duplicates: int = 0
+    updated_duplicate_files: int = 0
     downloaded: int = 0
     folders_created_remote: int = 0
     folders_created_local: int = 0
@@ -770,6 +771,62 @@ class TwoWaySyncEngine:
             meta = self.client.get_metadata(fid)
             if self._remote_fingerprint(meta) != expected:
                 raise RuntimeError("Drive duplicate changed during sync; refusing update")
+
+    def _refresh_older_duplicate_ids(
+        self, rel: str, canonical_id: str, report: SyncReport,
+    ) -> None:
+        """Bring older Drive objects to the same newest bytes, never delete them.
+
+        All candidates were explicitly opted in and checked before starting.
+        This loop is not atomic across Drive IDs; any changed metadata or failed
+        update is an explicit sync failure, to be safely retried.
+        """
+        if rel not in self._auto_update_guards:
+            return
+        before_local, verified, source = self._auto_update_guards[rel]
+        if canonical_id != self._canonical_ids.get(rel):
+            raise RuntimeError("Drive target identity changed during duplicate convergence")
+        with opened_source(self.local_root, rel) as data:
+            stat = data.stat()
+            md5 = md5_file(data)
+            if source == "local" and (
+                (stat.st_mtime_ns, stat.st_size) !=
+                (before_local.mtime_ns, before_local.size)
+                or md5 != before_local.md5
+            ):
+                raise RuntimeError("Local source changed before duplicate convergence")
+        canonical = self.client.get_metadata(canonical_id)
+        if (canonical.trashed or canonical.md5_checksum != md5
+                or canonical.size != stat.st_size):
+            raise RuntimeError("Selected canonical Drive file does not match source bytes")
+        updater = getattr(self.client, "update_file", None)
+        if not callable(updater):
+            raise RuntimeError("Drive adapter cannot update older duplicate IDs")
+        for fid, original in sorted(verified.items()):
+            if fid == canonical_id:
+                continue
+            self._check_cancel()
+            current = self.client.get_metadata(fid)
+            if self._remote_fingerprint(current) != original:
+                raise RuntimeError("Older Drive duplicate changed; refusing overwrite")
+            if current.md5_checksum == md5 and current.size == stat.st_size:
+                continue
+            with opened_source(self.local_root, rel) as handle:
+                before_stat = handle.stat()
+                if (before_stat.st_size != stat.st_size
+                        or before_stat.st_mtime_ns != stat.st_mtime_ns
+                        or md5_file(handle) != md5):
+                    raise RuntimeError("Local source changed during duplicate convergence")
+                result_id = updater(fid, handle, progress_cb=self._check_cancel)
+            if result_id != fid:
+                raise RuntimeError("Drive update changed duplicate identity")
+            final = self.client.get_metadata(fid)
+            if (final.trashed or final.name != current.name
+                    or tuple(final.parents) != tuple(current.parents)
+                    or final.mime_type != current.mime_type
+                    or final.md5_checksum != md5 or final.size != stat.st_size):
+                raise RuntimeError("Older Drive duplicate failed post-upload verification")
+            report.updated_duplicate_files += 1
 
     def _path_conflicts(
         self, remote: dict[str, RemoteEntry], local_paths: set[str],
@@ -1447,15 +1504,18 @@ class TwoWaySyncEngine:
                                       meta.md5_checksum or L.md5, meta.size or L.size,
                                       mime_type=meta.mime_type,
                                       web_view_link=meta.web_view_link)
+            self._refresh_older_duplicate_ids(rel, fid, report)
             self._record(rel, local, remote)
             report.uploaded += 1
 
         elif a.kind == ActionKind.DOWNLOAD:
             R = remote[rel]
+            self._recheck_auto_update(rel, R.file_id)
             dest = safe_local_path(self.local_root, rel)
             self._download_remote(R, dest)
             st = dest.stat()
             local[rel] = LocalEntry(rel, st.st_mtime_ns, st.st_size, md5_file(dest))
+            self._refresh_older_duplicate_ids(rel, R.file_id, report)
             self._record(rel, local, remote)
             report.downloaded += 1
 
@@ -1484,6 +1544,7 @@ class TwoWaySyncEngine:
         elif a.kind == ActionKind.RECORD:
             if rel in self._auto_update_guards:
                 self._recheck_auto_update(rel, remote[rel].file_id)
+                self._refresh_older_duplicate_ids(rel, remote[rel].file_id, report)
             self._record(rel, local, remote)
             report.recorded += 1
 
