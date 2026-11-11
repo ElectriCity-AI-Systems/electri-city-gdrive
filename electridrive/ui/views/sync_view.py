@@ -182,7 +182,47 @@ class SyncView(QWidget):
         remove.clicked.connect(lambda: self._remove(index))
         top.addWidget(remove)
         card.v.addLayout(top)
-        card.v.addWidget(review, alignment=Qt.AlignLeft)
+        options = QHBoxLayout()
+        options.addWidget(review)
+        if pair.direction == "up_only":
+            auto = QPushButton(
+                "Auto newest: ON" if pair.auto_select_newest_duplicate
+                else "Auto newest: OFF"
+            )
+            auto.setObjectName("AutoNewestDuplicate")
+            auto.setProperty("ghost", True)
+            auto.setToolTip(
+                "Upload-only: update all older same-name Drive objects from "
+                "the strictly newer local file. Preserves Drive IDs."
+            )
+            auto.setEnabled(not self._sync_busy)
+            auto.clicked.connect(lambda: self._toggle_auto_newest_duplicate(index))
+            options.addWidget(auto)
+            switch = QPushButton("Use two-way Latest wins")
+            switch.setObjectName("EnableTwoWayLatest")
+            switch.setProperty("ghost", True)
+            switch.setToolTip(
+                "Explicitly switch this Upload-only pair to two-way Latest "
+                "wins. This permits downloads of remote-only and newer files."
+            )
+            switch.setEnabled(not self._sync_busy)
+            switch.clicked.connect(lambda: self._enable_two_way_latest(index))
+            options.addWidget(switch)
+        elif pair.direction == "two_way":
+            latest = QPushButton(
+                "Latest wins: ON" if pair.latest_wins else "Latest wins: OFF"
+            )
+            latest.setObjectName("LatestWins")
+            latest.setProperty("ghost", True)
+            latest.setToolTip(
+                "Two-way: unambiguously newest file overwrites the older "
+                "counterpart; update older same-name Drive copies in place."
+            )
+            latest.setEnabled(not self._sync_busy)
+            latest.clicked.connect(lambda: self._toggle_latest_wins(index))
+            options.addWidget(latest)
+        options.addStretch()
+        card.v.addLayout(options)
         return card
 
     @staticmethod
@@ -456,6 +496,90 @@ class SyncView(QWidget):
             if other_remote == canonical_remote:
                 return True
         return False
+
+    def _enable_two_way_latest(self, index: int):
+        pairs = self._session.settings.sync_pairs
+        if not (0 <= index < len(pairs)) or self._sync_busy:
+            return
+        pair = pairs[index]
+        if pair.direction != "up_only":
+            return
+        message = (
+            "Change this Upload-only pair to TWO-WAY Latest wins?\\n\\n"
+            "ElectriDrive will be authorized to download newer and remote-only "
+            "files into the local folder, and to update outdated files in Drive. "
+            "Same-name Drive duplicates may all be media-updated; "
+            "no Drive file will be deleted by this mode.\\n\\n"
+            "Deletion propagation will be disabled. Existing folder mappings "
+            "are preserved. This change will NOT start synchronization. "
+            "Verify backups and test with disposable files first."
+        )
+        if QMessageBox.question(
+            self, "Convert pair to two-way Latest wins?", message
+        ) != QMessageBox.Yes:
+            return
+        pair.direction = "two_way"
+        pair.delete_policy = "off"
+        pair.latest_wins = True
+        pair.auto_select_newest_duplicate = False
+        self._session.save()
+        self._reload()
+
+    def _toggle_latest_wins(self, index: int):
+        pairs = self._session.settings.sync_pairs
+        if not (0 <= index < len(pairs)) or self._sync_busy:
+            return
+        pair = pairs[index]
+        if pair.direction != "two_way":
+            return
+        enable = not pair.latest_wins
+        if enable:
+            message = (
+                "Enable automatic latest-version wins for this Two-way pair?\\n\\n"
+                "If an existing local file is newer, ElectriDrive can overwrite "
+                "older Drive content. If a Drive file is newer, it can overwrite "
+                "older local content. Same-name Drive duplicates may ALL be "
+                "updated in place. Older local content is kept in recovery "
+                "storage; Google Drive may retain revisions.\\n\\n"
+                "No synchronization starts until Sync now is clicked. "
+                "Check current backups before enabling."
+            )
+            if QMessageBox.question(
+                self, "Enable Latest wins for two-way synchronization?", message
+            ) != QMessageBox.Yes:
+                return
+        pair.latest_wins = enable
+        if enable:
+            # Latest-wins is about updating content, never propagating deletions.
+            pair.delete_policy = "off"
+        self._session.save()
+        self._reload()
+
+    def _toggle_auto_newest_duplicate(self, index: int):
+        pairs = self._session.settings.sync_pairs
+        if not (0 <= index < len(pairs)) or self._sync_busy:
+            return
+        pair = pairs[index]
+        if pair.direction != "up_only":
+            return
+        enable = not pair.auto_select_newest_duplicate
+        if enable:
+            message = (
+                "Automatically update the uniquely newest existing Google Drive "
+                "duplicate with a strictly newer local file for this Upload-only "
+                "pair?\\n\\n"
+                "This can overwrite older Drive files of the same name under "
+                "their existing IDs; no new copies are created.\\n\\n"
+                "Only enable after inspecting your Drive folder and keeping "
+                "recoverable backups. No sync starts until you click Sync now."
+            )
+            if QMessageBox.question(
+                self, "Enable automatic newest-duplicate updates?", message
+            ) != QMessageBox.Yes:
+                return
+        pair.auto_select_newest_duplicate = enable
+        self._session.save()
+        self._reload()
 
     def _toggle_pair(self, index: int):
         pairs = self._session.settings.sync_pairs

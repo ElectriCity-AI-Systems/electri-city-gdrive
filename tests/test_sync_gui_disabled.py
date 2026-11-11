@@ -101,6 +101,131 @@ def test_enabled_pair_still_has_actionable_sync_button(qapp, tmp_path):
         _dispose(view, qapp)
 
 
+def test_auto_newest_toggle_requires_consent_and_never_starts_sync(
+    qapp, tmp_path, monkeypatch,
+):
+    pair = SyncPair(
+        str(tmp_path / "Documents"), "ElectriDrive/Documents",
+        direction="up_only", enabled=True,
+    )
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    try:
+        buttons = lambda: [
+            b for b in view.findChildren(QPushButton)
+            if b.objectName() == "AutoNewestDuplicate" and b.isVisibleTo(view)
+        ]
+        assert len(buttons()) == 1
+        assert buttons()[0].text() == "Auto newest: OFF"
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *args, **kwargs: QMessageBox.No)
+        view._toggle_auto_newest_duplicate(0)
+        assert not pair.auto_select_newest_duplicate
+        assert saved == [] and session.submitted == []
+
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *args, **kwargs: QMessageBox.Yes)
+        view._toggle_auto_newest_duplicate(0)
+        assert pair.auto_select_newest_duplicate
+        assert saved == [True] and session.submitted == []
+
+        # The same owner can turn the behavior off without another write.
+        view._toggle_auto_newest_duplicate(0)
+        assert not pair.auto_select_newest_duplicate
+        assert saved == [True, True] and session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
+def test_auto_newest_not_offered_for_two_way_or_during_sync(qapp, tmp_path):
+    up = SyncPair(str(tmp_path / "up"), "ElectriDrive/Up", direction="up_only")
+    two_way = SyncPair(str(tmp_path / "two"), "ElectriDrive/Two", direction="two_way")
+    session = FakeSession([up, two_way])
+    view = SyncView(session, get_palette("electric_dark"))
+    try:
+        auto_buttons = [b for b in view.findChildren(QPushButton)
+                        if b.objectName() == "AutoNewestDuplicate"]
+        assert len(auto_buttons) == 1
+        assert auto_buttons[0].text() == "Auto newest: OFF"
+        view._sync_busy = True
+        view._reload()
+        view._toggle_auto_newest_duplicate(0)
+        assert not up.auto_select_newest_duplicate
+        fresh = [b for b in view.findChildren(QPushButton)
+                 if b.objectName() == "AutoNewestDuplicate" and b.isVisibleTo(view)]
+        assert len(fresh) == 1 and not fresh[0].isEnabled()
+        assert session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
+def test_latest_wins_two_way_opt_in_requires_confirmation_and_no_sync(
+    qapp, tmp_path, monkeypatch,
+):
+    pair = SyncPair(
+        str(tmp_path / "docs"), "ElectriDrive/Documents",
+        direction="two_way", latest_wins=False,
+    )
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    try:
+        buttons = [b for b in view.findChildren(QPushButton)
+                   if b.objectName() == "LatestWins"]
+        assert len(buttons) == 1
+        assert buttons[0].text() == "Latest wins: OFF"
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.No)
+        view._toggle_latest_wins(0)
+        assert not pair.latest_wins and not saved
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.Yes)
+        view._toggle_latest_wins(0)
+        assert pair.latest_wins
+        assert pair.delete_policy == "off"
+        assert saved == [True] and session.submitted == []
+        view._toggle_latest_wins(0)
+        assert not pair.latest_wins
+        assert saved == [True, True] and session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
+def test_existing_upload_pair_can_convert_to_two_way_latest_without_sync(
+    qapp, tmp_path, monkeypatch,
+):
+    pair = SyncPair(
+        str(tmp_path / "docs"), "ElectriDrive/Documents",
+        direction="up_only", delete_policy="trash",
+        auto_select_newest_duplicate=True,
+    )
+    session = FakeSession([pair])
+    saved = []
+    session.save = lambda: saved.append(True)
+    view = SyncView(session, get_palette("electric_dark"))
+    try:
+        choices = [b for b in view.findChildren(QPushButton)
+                   if b.objectName() == "EnableTwoWayLatest"]
+        assert len(choices) == 1
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.No)
+        view._enable_two_way_latest(0)
+        assert pair.direction == "up_only" and not pair.latest_wins
+        assert not saved
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.Yes)
+        view._enable_two_way_latest(0)
+        assert pair.direction == "two_way" and pair.latest_wins
+        assert pair.delete_policy == "off"
+        assert not pair.auto_select_newest_duplicate
+        assert saved == [True] and session.submitted == []
+    finally:
+        _dispose(view, qapp)
+
+
 def test_gui_new_pair_starts_disabled_and_requires_explicit_enable(
     qapp, tmp_path, monkeypatch,
 ):

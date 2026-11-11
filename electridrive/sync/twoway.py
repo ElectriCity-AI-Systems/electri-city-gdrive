@@ -20,13 +20,14 @@ from electridrive import qa_policy as qa
 import hashlib
 import logging
 import json
+import math
 import os
 import tempfile
 import uuid
 import shutil
 from collections import Counter
 from dataclasses import dataclass, field, replace, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -118,6 +119,8 @@ class SyncReport:
     excluded_local: int = 0
     excluded_remote: int = 0
     uploaded: int = 0
+    auto_selected_duplicates: int = 0
+    updated_duplicate_files: int = 0
     downloaded: int = 0
     folders_created_remote: int = 0
     folders_created_local: int = 0
@@ -144,6 +147,36 @@ def _newer(local: LocalEntry, remote: RemoteEntry) -> str:
     return "local" if (local.mtime_ns / 1e9) >= _parse_iso(remote.modified) else "remote"
 
 
+def _strict_timestamp(value: str | None) -> float | None:
+    """Never treat missing, naive or malformed Drive timestamps as old files."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        result = parsed.timestamp()
+        return result if math.isfinite(result) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _strict_newest_side(local: LocalEntry, remote: RemoteEntry) -> str | None:
+    """Return the sole newest version, else require review before any write."""
+    remote_time = _strict_timestamp(remote.modified)
+    local_time = local.mtime_ns / 1e9
+    now = datetime.now(timezone.utc).timestamp()
+    if (remote_time is None or not math.isfinite(local_time)
+            or local_time > now + 300 or remote_time > now + 300):
+        return None
+    delta = local_time - remote_time
+    if delta > 2.0:
+        return "local"
+    if delta < -2.0:
+        return "remote"
+    return None
+
+
 def reconcile(
     local: dict[str, LocalEntry],
     remote: dict[str, RemoteEntry],
@@ -151,6 +184,7 @@ def reconcile(
     *,
     direction: str = "two_way",
     delete_policy: str = "trash",
+    latest_wins: bool = False,
 ) -> list[Action]:
     """Pure 3-way reconciliation. Returns an ordered list of actions to apply."""
     actions: list[Action] = []
@@ -188,6 +222,17 @@ def reconcile(
             continue
 
         if L and R:
+            if latest_wins and direction == "two_way" and not R.is_google_doc and L.md5 != R.md5:
+                winner = _strict_newest_side(L, R)
+                if winner is None:
+                    # Caller preflights this before any remote/local transfer.
+                    actions.append(Action(ActionKind.CONFLICT, rel, "ambiguous"))
+                else:
+                    actions.append(Action(
+                        ActionKind.UPLOAD if winner == "local" else ActionKind.DOWNLOAD,
+                        rel,
+                    ))
+                continue
             if L.md5 == R.md5:
                 if S is None or S.local_md5 != L.md5 or S.remote_md5 != R.md5:
                     actions.append(Action(ActionKind.RECORD, rel))
@@ -354,6 +399,8 @@ class TwoWaySyncEngine:
         # Drive allows multiple distinct file IDs under the same folder/name.
         # Retain all IDs so upload-only can reject ambiguous write targets.
         self._duplicate_remote_ids: dict[str, set[str]] = {}
+        self._duplicate_remote_entries: dict[str, dict[str, RemoteEntry]] = {}
+        self._auto_update_guards: dict[str, tuple[LocalEntry | None, dict[str, tuple], str]] = {}
         self._path_conflict_candidates: dict[
             str, dict[str, RemotePathCandidate]
         ] = {}
@@ -408,6 +455,7 @@ class TwoWaySyncEngine:
         self._remote_dirs = set()
         self._remote_scan_errors = []
         self._duplicate_remote_ids = {}
+        self._duplicate_remote_entries = {}
         self._path_conflict_candidates = {}
         self._path_conflict_reasons = {}
         self._dir_candidates = {}
@@ -557,7 +605,9 @@ class TwoWaySyncEngine:
                 self._candidate_from_entry(candidate),
             )
             self._duplicate_file_paths.add(candidate.rel)
-            if self.pair.direction == "up_only":
+            if self.pair.direction == "up_only" or (
+                self.pair.direction == "two_way" and self.pair.latest_wins
+            ):
                 # Remote-only objects will never be downloaded, updated or
                 # trashed in upload-only mode. Track ambiguous IDs rather than
                 # blocking unrelated local uploads. Validate every local upload
@@ -567,6 +617,9 @@ class TwoWaySyncEngine:
                     candidate.rel, {existing.file_id}
                 )
                 duplicates.add(candidate.file_id)
+                self._duplicate_remote_entries.setdefault(
+                    candidate.rel, {existing.file_id: existing}
+                )[candidate.file_id] = candidate
                 if preferred == candidate.file_id:
                     entries[candidate.rel] = candidate
                 return
@@ -623,6 +676,233 @@ class TwoWaySyncEngine:
         by_id = self._path_conflict_candidates.setdefault(rel, {})
         for candidate in candidates:
             by_id[candidate.file_id] = candidate
+
+    @staticmethod
+    def _remote_fingerprint(meta) -> tuple:
+        return (meta.id, meta.name, tuple(meta.parents), meta.modified_time,
+                meta.size, meta.md5_checksum, meta.mime_type, meta.trashed)
+
+    def _auto_select_newest_duplicate(
+        self,
+        rel: str,
+        local: LocalEntry | None,
+        remote: dict[str, RemoteEntry],
+        last: dict[str, LastEntry],
+    ) -> bool:
+        """Select newest binary Drive ID for an explicitly opted-in sync pair.
+
+        Only a strictly newer local file authorizes this one-time adoption. A
+        previous sync binding, owner-reviewed ID, ties, unsafe names or missing
+        checksums always take precedence over an automatic choice. Every
+        candidate is freshly checked against the completed cloud inventory.
+        """
+        if (not (self.pair.direction == "up_only"
+                  and self.pair.auto_select_newest_duplicate is True
+                  or self.pair.direction == "two_way"
+                  and self.pair.latest_wins is True) or rel in last
+                or rel in self.pair.canonical_remote_ids
+                or rel in self._canonical_ids or self._remote_scan_errors):
+            return False
+        candidates = self._duplicate_remote_entries.get(rel, {})
+        if len(candidates) < 2 or set(candidates) != self._duplicate_remote_ids.get(rel):
+            return False
+        parent_path = Path(rel).parent.as_posix()
+        parent_id = self._dir_ids.get("" if parent_path == "." else parent_path)
+        if not parent_id:
+            return False
+        timestamps = {}
+        for fid, entry in candidates.items():
+            stamp = _strict_timestamp(entry.modified)
+            if (stamp is None or entry.is_google_doc
+                    or (entry.mime_type or "").startswith("application/vnd.google-apps.")
+                    or not entry.md5 or not fid):
+                return False
+            timestamps[fid] = stamp
+        newest_id = max(timestamps, key=timestamps.get)
+        newest_stamp = timestamps[newest_id]
+        # Allow a margin for timestamp precision and clock differences.
+        if sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1:
+            return False
+        if local is None:
+            if self.pair.direction != "two_way":
+                return False
+            source = "remote"
+        else:
+            source = _strict_newest_side(local, candidates[newest_id])
+            if source is None or (self.pair.direction == "up_only" and source != "local"):
+                return False
+            # If the local version matches an *older* candidate, adopting
+            # another Drive ID as an upload target is not a safe assumption.
+            if source == "local" and any(
+                entry.md5 == local.md5 for fid, entry in candidates.items()
+                if fid != newest_id
+            ):
+                return False
+
+        verified = {}
+        for fid, entry in sorted(candidates.items()):
+            self._check_cancel()
+            try:
+                meta = self.client.get_metadata(fid)
+            except Exception:
+                return False
+            if (meta.id != fid or meta.trashed or meta.is_folder
+                    or meta.name != Path(rel).name
+                    or tuple(meta.parents) != (parent_id,)
+                    or meta.modified_time != entry.modified
+                    or meta.md5_checksum != entry.md5
+                    or meta.size != entry.size
+                    or meta.mime_type != entry.mime_type
+                    or (meta.mime_type or "").startswith("application/vnd.google-apps.")):
+                return False
+            verified[fid] = self._remote_fingerprint(meta)
+
+        self._canonical_ids[rel] = newest_id
+        remote[rel] = candidates[newest_id]
+        self._auto_update_guards[rel] = (local, verified, source)
+        return True
+
+    def _auto_adopt_unique_remote_entry(
+        self, rel: str, local: LocalEntry, remote: RemoteEntry,
+    ) -> bool:
+        """First-time latest-wins adoption of exactly one binary Drive object.
+
+        The complete remote traversal has shown this path is unique, while a
+        separate metadata read verifies the immutable ID and folder identity.
+        """
+        if (self.pair.direction != "two_way" or not self.pair.latest_wins
+                or rel in self._canonical_ids or rel in self._duplicate_file_paths
+                or rel in self._path_conflict_candidates
+                or remote.is_google_doc or not remote.md5
+                or _strict_newest_side(local, remote) is None):
+            return False
+        parent = Path(rel).parent.as_posix()
+        parent_id = self._dir_ids.get("" if parent == "." else parent)
+        if not parent_id:
+            return False
+        self._check_cancel()
+        try:
+            meta = self.client.get_metadata(remote.file_id)
+        except Exception:
+            return False
+        if (meta.id != remote.file_id or meta.trashed or meta.is_folder
+                or meta.name != Path(rel).name
+                or tuple(meta.parents) != (parent_id,)
+                or meta.modified_time != remote.modified
+                or meta.md5_checksum != remote.md5
+                or meta.size != remote.size
+                or meta.mime_type != remote.mime_type
+                or (meta.mime_type or "").startswith("application/vnd.google-apps.")):
+            return False
+        self._canonical_ids[rel] = remote.file_id
+        self._auto_update_guards[rel] = (
+            local, {remote.file_id: self._remote_fingerprint(meta)},
+            _strict_newest_side(local, remote),
+        )
+        return True
+
+    def _recheck_auto_update(self, rel: str, chosen_id: str) -> None:
+        """Re-check all duplicate identities and the local bytes before a write."""
+        if rel not in self._auto_update_guards:
+            return
+        local, verified, _source = self._auto_update_guards[rel]
+        if chosen_id != self._canonical_ids.get(rel) or chosen_id not in verified:
+            raise RuntimeError("Auto-selected Drive target changed; refusing update")
+        if local is not None:
+            with opened_source(self.local_root, rel) as source:
+                st = source.stat()
+                if ((st.st_mtime_ns, st.st_size) != (local.mtime_ns, local.size)
+                        or md5_file(source) != local.md5):
+                    raise RuntimeError("Local file changed after duplicate review; refusing update")
+        for fid, expected in sorted(verified.items()):
+            self._check_cancel()
+            meta = self.client.get_metadata(fid)
+            if self._remote_fingerprint(meta) != expected:
+                raise RuntimeError("Drive duplicate changed during sync; refusing update")
+
+    def _verify_latest_pair_before_write(
+        self, rel: str, local: LocalEntry, remote: RemoteEntry,
+    ) -> None:
+        """Reject concurrent edits to either side of an opted-in latest-wins pair."""
+        if self.pair.direction != "two_way" or not self.pair.latest_wins:
+            return
+        if remote.is_google_doc:
+            return  # Existing Workspace export behavior is unchanged.
+        with opened_source(self.local_root, rel) as src:
+            st = src.stat()
+            if ((st.st_mtime_ns, st.st_size) != (local.mtime_ns, local.size)
+                    or md5_file(src) != local.md5):
+                raise RuntimeError("Local file changed since Latest wins scan")
+        self._check_cancel()
+        meta = self.client.get_metadata(remote.file_id)
+        parent = Path(rel).parent.as_posix()
+        parent_id = self._dir_ids.get("" if parent == "." else parent)
+        if (not parent_id or meta.id != remote.file_id or meta.trashed
+                or meta.is_folder or meta.name != Path(rel).name
+                or tuple(meta.parents) != (parent_id,)
+                or meta.modified_time != remote.modified
+                or meta.size != remote.size
+                or meta.md5_checksum != remote.md5
+                or meta.mime_type != remote.mime_type):
+            raise RuntimeError("Drive file changed since Latest wins scan")
+
+    def _refresh_older_duplicate_ids(
+        self, rel: str, canonical_id: str, report: SyncReport,
+    ) -> None:
+        """Bring older Drive objects to the same newest bytes, never delete them.
+
+        All candidates were explicitly opted in and checked before starting.
+        This loop is not atomic across Drive IDs; any changed metadata or failed
+        update is an explicit sync failure, to be safely retried.
+        """
+        if rel not in self._auto_update_guards:
+            return
+        before_local, verified, source = self._auto_update_guards[rel]
+        if canonical_id != self._canonical_ids.get(rel):
+            raise RuntimeError("Drive target identity changed during duplicate convergence")
+        with opened_source(self.local_root, rel) as data:
+            stat = data.stat()
+            md5 = md5_file(data)
+            if source == "local" and (
+                before_local is None or
+                (stat.st_mtime_ns, stat.st_size) !=
+                (before_local.mtime_ns, before_local.size)
+                or md5 != before_local.md5
+            ):
+                raise RuntimeError("Local source changed before duplicate convergence")
+        canonical = self.client.get_metadata(canonical_id)
+        if (canonical.trashed or canonical.md5_checksum != md5
+                or canonical.size != stat.st_size):
+            raise RuntimeError("Selected canonical Drive file does not match source bytes")
+        updater = getattr(self.client, "update_file", None)
+        if not callable(updater):
+            raise RuntimeError("Drive adapter cannot update older duplicate IDs")
+        for fid, original in sorted(verified.items()):
+            if fid == canonical_id:
+                continue
+            self._check_cancel()
+            current = self.client.get_metadata(fid)
+            if self._remote_fingerprint(current) != original:
+                raise RuntimeError("Older Drive duplicate changed; refusing overwrite")
+            if current.md5_checksum == md5 and current.size == stat.st_size:
+                continue
+            with opened_source(self.local_root, rel) as handle:
+                before_stat = handle.stat()
+                if (before_stat.st_size != stat.st_size
+                        or before_stat.st_mtime_ns != stat.st_mtime_ns
+                        or md5_file(handle) != md5):
+                    raise RuntimeError("Local source changed during duplicate convergence")
+                self._invalidate_remote_snapshot()
+                result_id = updater(fid, handle, progress_cb=self._check_cancel)
+            if result_id != fid:
+                raise RuntimeError("Drive update changed duplicate identity")
+            final = self.client.get_metadata(fid)
+            if (final.trashed or final.name != current.name
+                    or tuple(final.parents) != tuple(current.parents)
+                    or final.mime_type != current.mime_type
+                    or final.md5_checksum != md5 or final.size != stat.st_size):
+                raise RuntimeError("Older Drive duplicate failed post-upload verification")
+            report.updated_duplicate_files += 1
 
     def _path_conflicts(
         self, remote: dict[str, RemoteEntry], local_paths: set[str],
@@ -921,6 +1201,7 @@ class TwoWaySyncEngine:
         qa.validate_pair(self.pair)
         self.client = qa.restrict_client(self.client)
         report = SyncReport(blocked_before_transfers=True)
+        self._auto_update_guards = {}
         if self.pair.direction not in {"two_way", "up_only", "down_only"}:
             self._report_failure(
                 report, f"unsupported sync direction: {self.pair.direction!r}"
@@ -984,7 +1265,9 @@ class TwoWaySyncEngine:
         report.scanned_remote_folders = len(self._remote_dirs)
         report.excluded_remote = self._remote_excluded
 
-        if self.pair.direction != "up_only":
+        if self.pair.direction == "down_only" or (
+            self.pair.direction == "two_way" and not self.pair.latest_wins
+        ):
             for rel in sorted(self._duplicate_file_paths):
                 candidates = self._path_conflict_candidates.get(rel, {})
                 preferred = self._canonical_ids.get(rel)
@@ -995,20 +1278,28 @@ class TwoWaySyncEngine:
                 ):
                     self._remote_scan_errors.append("duplicate remote file path")
 
-        if self.pair.direction == "up_only":
+        if self.pair.direction == "up_only" or (
+            self.pair.direction == "two_way" and self.pair.latest_wins
+        ):
             for rel, candidate_ids in sorted(self._duplicate_remote_ids.items()):
-                if rel not in local:
+                if rel not in local and self.pair.direction == "up_only":
                     # Upload-only never touches this remote-only path.
                     continue
                 preferred = self._canonical_ids.get(rel)
                 if (not preferred or preferred not in candidate_ids
                         or remote.get(rel) is None
                         or remote[rel].file_id != preferred):
-                    # No arbitrary choice between distinct Drive IDs. Even
-                    # identical bytes would not establish canonical identity.
-                    self._remote_scan_errors.append(
-                        "ambiguous upload target: duplicate remote file path"
-                    )
+                    # A unique newest binary file may be adopted only when the
+                    # local content is strictly newer than *all* duplicates.
+                    # All other originals are preserved under their Drive IDs.
+                    if self._auto_select_newest_duplicate(rel, local.get(rel), remote, last):
+                        report.auto_selected_duplicates += 1
+                        self._log("Latest-wins: newest duplicate Drive ID selected; "
+                                  "older Drive IDs will be updated in place")
+                    else:
+                        self._remote_scan_errors.append(
+                            "ambiguous upload target: duplicate remote file path"
+                        )
         # A reviewed ID is an immutable binding, not a preference.  Even if
         # the other duplicate is now the only file at this path, it must not
         # inherit authorization to be updated or downloaded.
@@ -1038,6 +1329,19 @@ class TwoWaySyncEngine:
                     "A native Google Workspace file cannot accept binary uploads."
                 )
         report.remote_path_conflicts = self._path_conflicts(remote, set(local))
+        if not self._remote_scan_errors and self.pair.latest_wins and self.pair.direction == "two_way":
+            # A first sync can encounter two *unique* existing files with no
+            # prior DB history. Adopt only after ID, parent and bytes are verified.
+            for rel in sorted(set(local) & set(remote)):
+                if (rel not in last and rel not in self._canonical_ids
+                        and not remote[rel].is_google_doc
+                        and local[rel].md5 != remote[rel].md5
+                        and not self._auto_adopt_unique_remote_entry(
+                            rel, local[rel], remote[rel]
+                        )):
+                    self._remote_scan_errors.append(
+                        "latest-wins existing target identity unverified"
+                    )
         if self._remote_scan_errors:
             self._remote_snapshot = None
             # Keep the validation counter, but do not log an indistinguishable
@@ -1059,11 +1363,21 @@ class TwoWaySyncEngine:
         # Use the same included inventory for convergence and completeness.
         self._local_dirs = {rel for rel in self._local_dirs if not self._excluded(rel)}
         self._remote_dirs = {rel for rel in self._remote_dirs if not self._excluded(rel)}
+        # Latest-wins is a strict opt-in. Ambiguous clocks must never trigger
+        # conflict-copy creation or implicit overwrites.
+        if self.pair.latest_wins and self.pair.direction == "two_way":
+            for rel in sorted(set(local) & set(remote)):
+                if (local[rel].md5 != remote[rel].md5
+                        and not remote[rel].is_google_doc
+                        and _strict_newest_side(local[rel], remote[rel]) is None):
+                    self._report_failure(report, "latest-wins timestamp ambiguous: " + rel)
+                    return report
         report.blocked_before_transfers = False
         self._sync_directories(report)
         actions = reconcile(local, remote, last,
                             direction=self.pair.direction,
-                            delete_policy=self.pair.delete_policy)
+                            delete_policy=self.pair.delete_policy,
+                            latest_wins=self.pair.latest_wins)
         self._log(f"Sync {self.local_root} <-> {self.pair.remote_folder}: "
                   f"{len(actions)} action(s)")
         for a in actions:
@@ -1258,6 +1572,11 @@ class TwoWaySyncEngine:
                 # This may be a locally disambiguated collision path.  Update
                 # media only so the original Drive name and parent stay intact.
                 existing = self._confirm_upload_target(rel, existing)
+                if self.pair.latest_wins and self.pair.direction == "two_way":
+                    if existing.file_id != remote[rel].file_id:
+                        raise RuntimeError("Drive target identity changed; explicit review required")
+                    self._verify_latest_pair_before_write(rel, L, remote[rel])
+                self._recheck_auto_update(rel, existing.file_id)
                 self._upload(rel, "", existing)
                 fid = existing.file_id
             else:
@@ -1278,15 +1597,20 @@ class TwoWaySyncEngine:
                                       meta.md5_checksum or L.md5, meta.size or L.size,
                                       mime_type=meta.mime_type,
                                       web_view_link=meta.web_view_link)
+            self._refresh_older_duplicate_ids(rel, fid, report)
             self._record(rel, local, remote)
             report.uploaded += 1
 
         elif a.kind == ActionKind.DOWNLOAD:
             R = remote[rel]
+            if rel in local:
+                self._verify_latest_pair_before_write(rel, local[rel], R)
+            self._recheck_auto_update(rel, R.file_id)
             dest = safe_local_path(self.local_root, rel)
             self._download_remote(R, dest)
             st = dest.stat()
             local[rel] = LocalEntry(rel, st.st_mtime_ns, st.st_size, md5_file(dest))
+            self._refresh_older_duplicate_ids(rel, R.file_id, report)
             self._record(rel, local, remote)
             report.downloaded += 1
 
@@ -1313,6 +1637,9 @@ class TwoWaySyncEngine:
             report.conflicts += 1
 
         elif a.kind == ActionKind.RECORD:
+            if rel in self._auto_update_guards:
+                self._recheck_auto_update(rel, remote[rel].file_id)
+                self._refresh_older_duplicate_ids(rel, remote[rel].file_id, report)
             self._record(rel, local, remote)
             report.recorded += 1
 
