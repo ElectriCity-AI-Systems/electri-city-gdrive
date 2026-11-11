@@ -854,6 +854,55 @@ def test_latest_wins_two_way_download_overwrites_old_local_and_old_cloud(tmp_pat
         db.close()
 
 
+def test_two_way_remote_newest_accepts_local_matching_older_cloud(tmp_path: Path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"same old content")
+    _set_local_age(local, 55)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("same.txt", b"same old content",
+                          parent=folder, modified=_utc_stamp(50))
+    newest = fake.add_file("same.txt", b"new cloud content",
+                           parent=folder, modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == 0 and result.downloaded == 1
+        assert result.updated_duplicate_files == 1
+        assert local.read_bytes() == b"new cloud content"
+        assert fake.nodes[newest]["content"] == b"new cloud content"
+        assert fake.nodes[older]["content"] == b"new cloud content"
+        assert fake.updates[0][0] == older
+        assert not fake.uploads
+    finally:
+        db.close()
+
+
+def test_two_way_latest_wins_resolves_two_sided_changes_without_extra_copy():
+    old = LastEntry("same.txt", "previous-local", "previous-remote", "id-same.txt")
+    local = LocalEntry("same.txt", 2_000_000_000_000_000_000, 12, "local-changed")
+    remote = RemoteEntry("same.txt", "id-same.txt", "2024-01-01T00:00:00Z",
+                         "remote-changed", 15)
+    actions = reconcile(
+        {"same.txt": local}, {"same.txt": remote}, {"same.txt": old},
+        latest_wins=True, direction="two_way",
+    )
+    assert len(actions) == 1 and actions[0].kind == ActionKind.UPLOAD
+
+    newer_remote = RemoteEntry("same.txt", "id-same.txt",
+                               "2040-01-01T00:00:00Z", "remote-changed", 15)
+    # A future Drive timestamp is not trustworthy; the caller must preflight it.
+    actions = reconcile(
+        {"same.txt": local}, {"same.txt": newer_remote}, {"same.txt": old},
+        latest_wins=True, direction="two_way",
+    )
+    assert len(actions) == 1 and actions[0].kind == ActionKind.DOWNLOAD
+
+
 def test_latest_wins_unique_cloud_file_overwrites_older_local(tmp_path: Path):
     root = tmp_path / "downloads"
     root.mkdir()
