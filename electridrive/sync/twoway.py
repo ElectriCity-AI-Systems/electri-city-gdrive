@@ -754,6 +754,45 @@ class TwoWaySyncEngine:
         self._auto_update_guards[rel] = (local, verified, source)
         return True
 
+    def _auto_adopt_unique_remote_entry(
+        self, rel: str, local: LocalEntry, remote: RemoteEntry,
+    ) -> bool:
+        """First-time latest-wins adoption of exactly one binary Drive object.
+
+        The complete remote traversal has shown this path is unique, while a
+        separate metadata read verifies the immutable ID and folder identity.
+        """
+        if (self.pair.direction != "two_way" or not self.pair.latest_wins
+                or rel in self._canonical_ids or rel in self._duplicate_file_paths
+                or rel in self._path_conflict_candidates
+                or remote.is_google_doc or not remote.md5
+                or _strict_newest_side(local, remote) is None):
+            return False
+        parent = Path(rel).parent.as_posix()
+        parent_id = self._dir_ids.get("" if parent == "." else parent)
+        if not parent_id:
+            return False
+        self._check_cancel()
+        try:
+            meta = self.client.get_metadata(remote.file_id)
+        except Exception:
+            return False
+        if (meta.id != remote.file_id or meta.trashed or meta.is_folder
+                or meta.name != Path(rel).name
+                or tuple(meta.parents) != (parent_id,)
+                or meta.modified_time != remote.modified
+                or meta.md5_checksum != remote.md5
+                or meta.size != remote.size
+                or meta.mime_type != remote.mime_type
+                or (meta.mime_type or "").startswith("application/vnd.google-apps.")):
+            return False
+        self._canonical_ids[rel] = remote.file_id
+        self._auto_update_guards[rel] = (
+            local, {remote.file_id: self._remote_fingerprint(meta)},
+            _strict_newest_side(local, remote),
+        )
+        return True
+
     def _recheck_auto_update(self, rel: str, chosen_id: str) -> None:
         """Re-check all duplicate identities and the local bytes before a write."""
         if rel not in self._auto_update_guards:
@@ -1253,6 +1292,19 @@ class TwoWaySyncEngine:
                     "A native Google Workspace file cannot accept binary uploads."
                 )
         report.remote_path_conflicts = self._path_conflicts(remote, set(local))
+        if not self._remote_scan_errors and self.pair.latest_wins and self.pair.direction == "two_way":
+            # A first sync can encounter two *unique* existing files with no
+            # prior DB history. Adopt only after ID, parent and bytes are verified.
+            for rel in sorted(set(local) & set(remote)):
+                if (rel not in last and rel not in self._canonical_ids
+                        and not remote[rel].is_google_doc
+                        and local[rel].md5 != remote[rel].md5
+                        and not self._auto_adopt_unique_remote_entry(
+                            rel, local[rel], remote[rel]
+                        )):
+                    self._remote_scan_errors.append(
+                        "latest-wins existing target identity unverified"
+                    )
         if self._remote_scan_errors:
             self._remote_snapshot = None
             # Keep the validation counter, but do not log an indistinguishable
