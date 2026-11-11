@@ -665,7 +665,8 @@ class TwoWaySyncEngine:
         checksums always take precedence over an automatic choice. Every
         candidate is freshly checked against the completed cloud inventory.
         """
-        if (self.pair.direction != "up_only" or rel in last
+        if (self.pair.direction != "up_only"
+                or self.pair.auto_select_newest_duplicate is not True or rel in last
                 or rel in self.pair.canonical_remote_ids
                 or rel in self._canonical_ids or self._remote_scan_errors):
             return False
