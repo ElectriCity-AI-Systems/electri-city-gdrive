@@ -880,6 +880,52 @@ def test_latest_wins_unique_cloud_file_overwrites_older_local(tmp_path: Path):
         db.close()
 
 
+def test_latest_wins_unique_existing_remote_without_history_updates_in_place(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"latest local")
+    _set_local_age(local, 1)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    remote = fake.add_file("same.txt", b"older cloud",
+                           parent=folder, modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == 0 and result.uploaded == 1
+        assert fake.updates == [(remote, str(local), None)]
+        assert not fake.uploads and result.conflicts == 0
+        assert fake.nodes[remote]["content"] == b"latest local"
+    finally:
+        db.close()
+
+
+def test_latest_wins_unique_cloud_newer_downloads_without_history(tmp_path: Path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"older local")
+    _set_local_age(local, 30)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    remote = fake.add_file("same.txt", b"latest remote",
+                           parent=folder, modified=_utc_stamp(1))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest",
+                        direction="two_way", latest_wins=True)
+        result = TwoWaySyncEngine(fake, db, pair).run()
+        assert result.failed == 0 and result.downloaded == 1
+        assert not fake.updates and not fake.uploads
+        assert local.read_bytes() == b"latest remote"
+        assert not list(root.glob("*conflict*"))
+    finally:
+        db.close()
+
+
 def test_latest_wins_ambiguous_timestamps_fail_without_touching_files(tmp_path: Path):
     root = tmp_path / "downloads"
     root.mkdir()
