@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import os
 
 import pytest
 
@@ -542,6 +544,189 @@ def test_up_only_refuses_ambiguous_existing_upload_target(tmp_path: Path):
         assert fake.nodes[first]["content"] == b"one"
         assert fake.nodes[second]["content"] == b"two"
         assert (root / "target.txt").read_bytes() == b"my local truth"
+    finally:
+        db.close()
+
+
+
+def _utc_stamp(ago_days: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=ago_days)).isoformat()
+
+
+def _set_local_age(path: Path, days: float) -> None:
+    stamp = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+def test_up_only_auto_updates_unique_newest_duplicate_when_local_is_newer(tmp_path: Path):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local = root / "hetzner2026.odt"
+    local.write_bytes(b"latest local document")
+    _set_local_age(local, 1)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("hetzner2026.odt", b"old original", parent=folder,
+                          modified=_utc_stamp(50))
+    newest = fake.add_file("hetzner2026.odt", b"newer drive original",
+                           parent=folder, modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+    try:
+        engine = TwoWaySyncEngine(fake, db, pair)
+        result = engine.run()
+        assert result.failed == result.unexplained_omissions == 0
+        assert result.auto_selected_duplicates == 1
+        assert result.uploaded == 1 and result.downloaded == 0
+        assert result.trashed_remote == result.trashed_local == 0
+        assert result.remote_path_conflicts[0].resolved
+        assert result.remote_path_conflicts[0].canonical_id == newest
+        assert fake.updates == [(newest, str(local), None)]
+        assert not fake.uploads
+        assert fake.nodes[newest]["content"] == b"latest local document"
+        assert fake.nodes[older]["content"] == b"old original"
+        assert not fake.nodes[older]["trashed"]
+        assert db.get_sync_item(engine.pair_id, "hetzner2026.odt").remote_id == newest
+
+        # The update records the immutable ID for the next process lifecycle.
+        before = len(fake.updates)
+        new_engine = TwoWaySyncEngine(fake, db, pair)
+        second = new_engine.run()
+        assert second.failed == 0 and second.uploaded == 0
+        assert second.auto_selected_duplicates == 0
+        assert len(fake.updates) == before
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("local_days,older_days,newer_days", [
+    (40, 50, 30),  # Drive newest is actually newer than local
+    (1, 30, 30),   # Tied remote dates cannot uniquely identify a target
+])
+def test_up_only_auto_selection_refuses_unsafe_timestamp_order(
+    tmp_path: Path, local_days: float, older_days: float, newer_days: float,
+):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"local data")
+    _set_local_age(local, local_days)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("same.txt", b"first", parent=folder,
+                          modified=_utc_stamp(older_days))
+    newest = fake.add_file("same.txt", b"second", parent=folder,
+                           modified=_utc_stamp(newer_days))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        result = TwoWaySyncEngine(
+            fake, db, SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        ).run()
+        assert result.failed >= 1
+        assert result.blocked_before_transfers
+        assert result.auto_selected_duplicates == 0
+        assert not fake.updates and not fake.uploads
+        assert fake.nodes[older]["content"] == b"first"
+        assert fake.nodes[newest]["content"] == b"second"
+    finally:
+        db.close()
+
+
+def test_up_only_auto_selection_preserves_older_matching_local_version(tmp_path: Path):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"old matching content")
+    _set_local_age(local, 1)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("same.txt", b"old matching content", parent=folder,
+                          modified=_utc_stamp(50))
+    newest = fake.add_file("same.txt", b"different newer content",
+                           parent=folder, modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        result = TwoWaySyncEngine(
+            fake, db, SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        ).run()
+        assert result.failed and result.blocked_before_transfers
+        assert not fake.updates and not fake.uploads
+        assert fake.nodes[older]["content"] == b"old matching content"
+        assert fake.nodes[newest]["content"] == b"different newer content"
+    finally:
+        db.close()
+
+
+def test_auto_adopt_rechecks_remote_metadata_before_overwrite(tmp_path: Path):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"local newest")
+    _set_local_age(local, 1)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("same.txt", b"old", parent=folder,
+                          modified=_utc_stamp(50))
+    newest = fake.add_file("same.txt", b"slightly newer", parent=folder,
+                           modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        engine = TwoWaySyncEngine(fake, db, pair)
+        original = engine._recheck_auto_update
+
+        def race(rel, selected):
+            # Simulate a different Drive client writing after the completed
+            # inventory and before the Upload-only API update.
+            fake.modify_file(newest, b"external newer content",
+                             modified=_utc_stamp(0))
+            original(rel, selected)
+
+        engine._recheck_auto_update = race
+        result = engine.run()
+        assert result.failed >= 1
+        assert result.uploaded == 0 and result.auto_selected_duplicates == 1
+        assert fake.nodes[newest]["content"] == b"external newer content"
+        assert fake.nodes[older]["content"] == b"old"
+        assert not fake.updates and not fake.uploads
+        assert db.get_sync_item(engine.pair_id, "same.txt") is None
+    finally:
+        db.close()
+
+
+def test_up_only_auto_selects_after_full_paginated_duplicate_scan(tmp_path: Path):
+    from electridrive.google_api.client import FileListing
+
+    class Paged(FakeDrive):
+        folder = ""
+
+        def list_folder(self, parent_id="root", page_token=None):
+            listing = super().list_folder(parent_id, None)
+            if parent_id != self.folder:
+                return listing
+            return (FileListing(listing.files[:1], "next") if page_token is None
+                    else FileListing(listing.files[1:], None))
+
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"new local")
+    _set_local_age(local, 1)
+    fake = Paged()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    fake.folder = folder
+    older = fake.add_file("same.txt", b"old", parent=folder,
+                          modified=_utc_stamp(50))
+    newest = fake.add_file("same.txt", b"newer cloud", parent=folder,
+                           modified=_utc_stamp(30))
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        result = TwoWaySyncEngine(
+            fake, db, SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only")
+        ).run()
+        assert result.failed == 0 and result.uploaded == 1
+        assert fake.updates == [(newest, str(local), None)]
+        assert fake.nodes[older]["content"] == b"old"
     finally:
         db.close()
 
