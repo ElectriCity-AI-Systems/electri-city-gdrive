@@ -198,8 +198,9 @@ default. An explicit `SyncRules()` object or
 that intentionally exclude build files.
 
 **Preflight existing personal pairs before enabling them.** Known same-name
-duplicates are automatically matched only under the strict Upload-only
-safeguards below. Otherwise, unknown identities remain blocked for owner review.
+duplicates are automatically matched only after enabling **Auto newest** for
+an individual Upload-only pair and passing the strict safeguards below.
+Otherwise, unknown identities remain blocked for owner review.
 No automatic rename/delete is performed. Existing disabled pairs stay disabled.
 
 ### Complete selected trees
@@ -210,8 +211,12 @@ pair ignores duplicated **remote-only** paths; it never downloads or deletes
 those objects. For a path that also exists locally, a previously recorded or
 owner-reviewed canonical Drive ID always wins.
 
-Without any earlier binding, Upload-only may automatically select the **single
-most recently modified** duplicate only when the local file is strictly newer
+The user must first explicitly enable **Auto newest: ON** for that Upload-only
+pair in the Two-way Sync screen (with a warning and confirmation). This
+setting defaults to OFF for all new and existing pairs. Enabling it does not
+start any transfer. Without any earlier binding, an opted-in Upload-only pair
+may then automatically select the **single most recently modified** duplicate
+only when the local file is strictly newer
 (by more than two seconds), the winner is unambiguous (over one second ahead
 of the next candidate), all candidates are ordinary binary files with
 verifiable checksums, and their exact names, parent IDs, sizes, timestamps
