@@ -814,6 +814,32 @@ class TwoWaySyncEngine:
             if self._remote_fingerprint(meta) != expected:
                 raise RuntimeError("Drive duplicate changed during sync; refusing update")
 
+    def _verify_latest_pair_before_write(
+        self, rel: str, local: LocalEntry, remote: RemoteEntry,
+    ) -> None:
+        """Reject concurrent edits to either side of an opted-in latest-wins pair."""
+        if self.pair.direction != "two_way" or not self.pair.latest_wins:
+            return
+        if remote.is_google_doc:
+            return  # Existing Workspace export behavior is unchanged.
+        with opened_source(self.local_root, rel) as src:
+            st = src.stat()
+            if ((st.st_mtime_ns, st.st_size) != (local.mtime_ns, local.size)
+                    or md5_file(src) != local.md5):
+                raise RuntimeError("Local file changed since Latest wins scan")
+        self._check_cancel()
+        meta = self.client.get_metadata(remote.file_id)
+        parent = Path(rel).parent.as_posix()
+        parent_id = self._dir_ids.get("" if parent == "." else parent)
+        if (not parent_id or meta.id != remote.file_id or meta.trashed
+                or meta.is_folder or meta.name != Path(rel).name
+                or tuple(meta.parents) != (parent_id,)
+                or meta.modified_time != remote.modified
+                or meta.size != remote.size
+                or meta.md5_checksum != remote.md5
+                or meta.mime_type != remote.mime_type):
+            raise RuntimeError("Drive file changed since Latest wins scan")
+
     def _refresh_older_duplicate_ids(
         self, rel: str, canonical_id: str, report: SyncReport,
     ) -> None:
@@ -1539,6 +1565,8 @@ class TwoWaySyncEngine:
                 # This may be a locally disambiguated collision path.  Update
                 # media only so the original Drive name and parent stay intact.
                 existing = self._confirm_upload_target(rel, existing)
+                if existing.file_id == remote[rel].file_id:
+                    self._verify_latest_pair_before_write(rel, L, remote[rel])
                 self._recheck_auto_update(rel, existing.file_id)
                 self._upload(rel, "", existing)
                 fid = existing.file_id
@@ -1566,6 +1594,8 @@ class TwoWaySyncEngine:
 
         elif a.kind == ActionKind.DOWNLOAD:
             R = remote[rel]
+            if rel in local:
+                self._verify_latest_pair_before_write(rel, local[rel], R)
             self._recheck_auto_update(rel, R.file_id)
             dest = safe_local_path(self.local_root, rel)
             self._download_remote(R, dest)
