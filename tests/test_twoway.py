@@ -1008,6 +1008,46 @@ def test_latest_wins_ambiguous_timestamps_fail_without_touching_files(tmp_path: 
         db.close()
 
 
+@pytest.mark.parametrize("local_newer", [True, False])
+def test_latest_wins_blocks_parallel_cloud_edit_for_known_id(
+    tmp_path: Path, local_newer: bool,
+):
+    root = tmp_path / "docs"
+    root.mkdir()
+    local = root / "same.txt"
+    local.write_bytes(b"local content")
+    _set_local_age(local, 1 if local_newer else 50)
+    fake = FakeDrive()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    remote = fake.add_file(
+        "same.txt", b"cloud content", parent=folder,
+        modified=_utc_stamp(30 if local_newer else 1),
+    )
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        pair = SyncPair(
+            str(root), "ElectriDrive/SyncTest",
+            direction="two_way", latest_wins=True,
+            canonical_remote_ids={"same.txt": remote},
+        )
+        engine = TwoWaySyncEngine(fake, db, pair)
+        preflight = engine._verify_latest_pair_before_write
+
+        def concurrent_remote_edit(rel, local_entry, remote_entry):
+            fake.modify_file(remote, b"concurrent cloud edit", modified=_utc_stamp(0))
+            preflight(rel, local_entry, remote_entry)
+
+        engine._verify_latest_pair_before_write = concurrent_remote_edit
+        result = engine.run()
+        assert result.failed >= 1
+        assert result.uploaded == result.downloaded == 0
+        assert not fake.updates and not fake.uploads
+        assert fake.nodes[remote]["content"] == b"concurrent cloud edit"
+        assert local.read_bytes() == b"local content"
+    finally:
+        db.close()
+
+
 def test_latest_wins_opt_out_keeps_legacy_conflict_copies(tmp_path: Path):
     root = tmp_path / "downloads"
     root.mkdir()
