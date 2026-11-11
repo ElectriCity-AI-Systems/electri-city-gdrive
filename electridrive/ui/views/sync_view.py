@@ -182,7 +182,25 @@ class SyncView(QWidget):
         remove.clicked.connect(lambda: self._remove(index))
         top.addWidget(remove)
         card.v.addLayout(top)
-        card.v.addWidget(review, alignment=Qt.AlignLeft)
+        options = QHBoxLayout()
+        options.addWidget(review)
+        if pair.direction == "up_only":
+            auto = QPushButton(
+                "Auto newest: ON" if pair.auto_select_newest_duplicate
+                else "Auto newest: OFF"
+            )
+            auto.setObjectName("AutoNewestDuplicate")
+            auto.setProperty("ghost", True)
+            auto.setToolTip(
+                "Opt in to updating the uniquely newest same-name Drive file "
+                "only when this local Upload-only file is strictly newer. "
+                "Other original Drive files stay unchanged."
+            )
+            auto.setEnabled(not self._sync_busy)
+            auto.clicked.connect(lambda: self._toggle_auto_newest_duplicate(index))
+            options.addWidget(auto)
+        options.addStretch()
+        card.v.addLayout(options)
         return card
 
     @staticmethod
@@ -456,6 +474,32 @@ class SyncView(QWidget):
             if other_remote == canonical_remote:
                 return True
         return False
+
+    def _toggle_auto_newest_duplicate(self, index: int):
+        pairs = self._session.settings.sync_pairs
+        if not (0 <= index < len(pairs)) or self._sync_busy:
+            return
+        pair = pairs[index]
+        if pair.direction != "up_only":
+            return
+        enable = not pair.auto_select_newest_duplicate
+        if enable:
+            message = (
+                "Automatically update the uniquely newest existing Google Drive "
+                "duplicate with a strictly newer local file for this Upload-only "
+                "pair?\\n\\n"
+                "This can overwrite that Drive file's current contents under "
+                "the same Drive ID. Other duplicates remain untouched.\\n\\n"
+                "Only enable after inspecting your Drive folder and keeping "
+                "recoverable backups. No sync starts until you click Sync now."
+            )
+            if QMessageBox.question(
+                self, "Enable automatic newest-duplicate updates?", message
+            ) != QMessageBox.Yes:
+                return
+        pair.auto_select_newest_duplicate = enable
+        self._session.save()
+        self._reload()
 
     def _toggle_pair(self, index: int):
         pairs = self._session.settings.sync_pairs
