@@ -560,6 +560,7 @@ def validate_pair(pair):
         if (not isinstance(pair.local_path, str) or not isinstance(pair.remote_folder, str)
                 or not isinstance(pair.direction, str) or not isinstance(pair.enabled, bool)
                 or not isinstance(pair.include_all_files, bool)
+                or not isinstance(pair.auto_select_newest_duplicate, bool)
                 or not isinstance(pair.canonical_remote_ids, dict)
                 or any(not isinstance(k, str) or not isinstance(v, str)
                        for k, v in pair.canonical_remote_ids.items())):
