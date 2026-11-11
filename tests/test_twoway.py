@@ -884,8 +884,9 @@ def test_two_way_remote_newest_accepts_local_matching_older_cloud(tmp_path: Path
 
 def test_two_way_latest_wins_resolves_two_sided_changes_without_extra_copy():
     old = LastEntry("same.txt", "previous-local", "previous-remote", "id-same.txt")
-    local = LocalEntry("same.txt", 2_000_000_000_000_000_000, 12, "local-changed")
-    remote = RemoteEntry("same.txt", "id-same.txt", "2024-01-01T00:00:00Z",
+    local_mtime = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1e9)
+    local = LocalEntry("same.txt", local_mtime, 12, "local-changed")
+    remote = RemoteEntry("same.txt", "id-same.txt", _utc_stamp(30),
                          "remote-changed", 15)
     actions = reconcile(
         {"same.txt": local}, {"same.txt": remote}, {"same.txt": old},
@@ -893,14 +894,21 @@ def test_two_way_latest_wins_resolves_two_sided_changes_without_extra_copy():
     )
     assert len(actions) == 1 and actions[0].kind == ActionKind.UPLOAD
 
-    newer_remote = RemoteEntry("same.txt", "id-same.txt",
-                               "2040-01-01T00:00:00Z", "remote-changed", 15)
-    # A future Drive timestamp is not trustworthy; the caller must preflight it.
+    newer_remote = RemoteEntry("same.txt", "id-same.txt", _utc_stamp(1),
+                               "remote-changed", 15)
     actions = reconcile(
         {"same.txt": local}, {"same.txt": newer_remote}, {"same.txt": old},
         latest_wins=True, direction="two_way",
     )
     assert len(actions) == 1 and actions[0].kind == ActionKind.DOWNLOAD
+
+    future = RemoteEntry("same.txt", "id-same.txt",
+                         "2040-01-01T00:00:00Z", "remote-changed", 15)
+    actions = reconcile(
+        {"same.txt": local}, {"same.txt": future}, {"same.txt": old},
+        latest_wins=True, direction="two_way",
+    )
+    assert len(actions) == 1 and actions[0].kind == ActionKind.CONFLICT
 
 
 def test_latest_wins_unique_cloud_file_overwrites_older_local(tmp_path: Path):
