@@ -1018,8 +1018,8 @@ def test_latest_wins_unique_cloud_newer_downloads_without_history(tmp_path: Path
     _set_local_age(local, 30)
     fake = FakeDrive()
     folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
-    remote = fake.add_file("same.txt", b"latest remote",
-                           parent=folder, modified=_utc_stamp(1))
+    fake.add_file("same.txt", b"latest remote",
+                  parent=folder, modified=_utc_stamp(1))
     db = SyncDatabase(tmp_path / "state.sqlite3")
     try:
         pair = SyncPair(str(root), "ElectriDrive/SyncTest",
