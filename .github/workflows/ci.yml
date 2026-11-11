@@ -21,6 +21,7 @@ jobs:
 
       - name: Install Qt and FUSE runtime libraries
         run: |
+          bash scripts/ci_apt_mirror_guard.sh
           sudo apt-get update
           sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libfuse2t64 fuse3
 
@@ -79,6 +80,7 @@ jobs:
 
       - name: Install desktop launch test tools
         run: |
+          bash scripts/ci_apt_mirror_guard.sh
           sudo apt-get update
           sudo apt-get install -y dbus-x11 desktop-file-utils libgtk-3-bin procps x11-utils xauth xvfb
 
