@@ -145,6 +145,9 @@ class SyncPair:
     # pairs without this key inherit True on load.
     include_all_files: bool = True
     canonical_remote_ids: dict[str, str] = field(default_factory=dict)
+    # Explicit opt-in: only a strictly newer local Upload-only file may update
+    # the single newest existing Drive duplicate. Other candidates stay intact.
+    auto_select_newest_duplicate: bool = False
 
 
 @dataclass
