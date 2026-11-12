@@ -10,6 +10,7 @@ from pathlib import Path
 
 from electridrive.config import SyncPair, get_paths, load_settings, selected_scopes
 from electridrive.google_api.client import GoogleDriveClient
+from electridrive.google_api.folder_target import direct_folder_id
 from electridrive.logging_setup import configure_logging
 from electridrive.storage.database import SyncDatabase
 from electridrive.sync.engine import UploadOnlySyncEngine
@@ -86,7 +87,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     try:
         pair = SyncPair(local_path=str(Path(args.local_folder).expanduser()),
                         remote_folder=args.remote_folder, direction=args.direction,
-                        delete_policy="off" if qa.current_policy() else "trash",
+                        delete_policy="off" if (
+                            qa.current_policy() or direct_folder_id(args.remote_folder) is not None
+                        ) else "trash",
                         canonical_remote_ids=_parse_confirmed_remote_ids(
                             getattr(args, "confirm_remote_id", None)))
         qa.validate_pair(pair)
@@ -216,7 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_up = sub.add_parser("sync-up", help="Upload-only sync (safe, never deletes)")
     p_up.add_argument("local_folder")
-    p_up.add_argument("--remote-folder", required=True)
+    p_up.add_argument("--remote-folder", required=True,
+                      help="Drive path or id:<existing-folder-ID> (full Drive scope required)")
     p_up.add_argument(
         "--confirm-remote-id", action="append", metavar="REL=ID", default=[],
         help="Explicitly confirm that the existing Drive file ID belongs to this sync "
@@ -227,7 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sync = sub.add_parser("sync", help="Two-way sync a local folder with Drive")
     p_sync.add_argument("local_folder")
-    p_sync.add_argument("--remote-folder", required=True)
+    p_sync.add_argument("--remote-folder", required=True,
+                        help="Drive path or id:<existing-folder-ID> (full Drive scope required)")
     p_sync.add_argument("--direction", choices=["two_way", "up_only", "down_only"],
                         default="two_way")
     p_sync.add_argument("--interval", type=float,

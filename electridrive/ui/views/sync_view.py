@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from electridrive import qa_policy as qa
 from electridrive.config import SyncPair
+from electridrive.google_api.folder_target import direct_folder_id, require_complete_folder_access
 from electridrive.sync.twoway import SyncReport
 from electridrive.ui import icons
 from electridrive.ui.drive_path_review import (
@@ -452,9 +453,14 @@ class SyncView(QWidget):
                 "Choose an explicit QA root ID:", choices, 0, False)
         else:
             remote, ok = QInputDialog.getText(self, "Remote Drive folder",
-                "Drive folder path:", text=self._session.settings.default_remote_folder
+                "Drive path or id:<existing-folder-ID>:", text=self._session.settings.default_remote_folder
                 + "/" + Path(local).name)
         if not ok or not remote.strip():
+            return
+        try:
+            exact_id_target = bool(direct_folder_id(remote.strip())) if not policy else False
+        except ValueError as exc:
+            show_readable_warning(self, self._p, "Invalid Drive folder ID", str(exc))
             return
         direction, ok = QInputDialog.getItem(
             self, "Sync direction", "Direction:",
@@ -474,7 +480,7 @@ class SyncView(QWidget):
         self._session.settings.sync_pairs.append(
             SyncPair(local_path=local, remote_folder=remote.strip(),
                      direction=direction, enabled=False,
-                     delete_policy="off" if policy else "trash"))
+                     delete_policy="off" if (policy or exact_id_target) else "trash"))
         self._session.save()
         self._reload()
 
@@ -588,6 +594,11 @@ class SyncView(QWidget):
         pair = pairs[index]
         if not pair.enabled:
             if not self._validate_qa(pair):
+                return
+            try:
+                require_complete_folder_access(pair.remote_folder)
+            except (ValueError, PermissionError) as exc:
+                show_readable_warning(self, self._p, "Drive folder ID access", str(exc))
                 return
             if self._sync_busy:
                 show_readable_warning(

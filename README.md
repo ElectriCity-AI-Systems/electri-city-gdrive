@@ -144,6 +144,34 @@ python -m electridrive.cli mount ~/ElectriDrive                     # files-on-d
 python -m electridrive.cli unmount ~/ElectriDrive
 ```
 
+### Exact existing Google Drive folder by ID
+
+For a pre-existing folder, enter `id:<folder-ID>` as the remote target in the
+Sync view, or supply the ID to the CLI:
+
+```sh
+electridrive sync ~/Documents --remote-folder "id:1SyntheticDriveFolderId00000000" --direction up_only
+```
+
+ElectriDrive reads metadata for **that immutable ID**, checks that it is a
+non-trashed, accessible Drive folder, and refuses malformed or inaccessible
+IDs. It never falls back to searching by name or creating another folder.
+Existing path-based targets and the sealed `qa:<ID>` syntax are unaffected.
+New GUI pairs start disabled. Explicit ID targets default to deletion
+propagation **OFF** in GUI and CLI, including two-way mode.
+
+**Permission limitation:** Automated sync to an existing ID target requires
+the separately authorized full Google `drive` OAuth scope. The standard
+`drive.file` scope, even after selecting a folder in Picker, can hide
+pre-existing child files. With only `drive.file`, this feature fails closed
+*before* any cloud write or transfer rather than interpreting incomplete
+listings as empty folders or creating duplicate files. The customer binary
+does **not** silently request expanded permissions. Full `drive` is a
+restricted Google scope with additional verification/security requirements;
+use only an appropriately configured publisher or self-hosted OAuth client.
+Direct IDs do not bypass Google access restrictions. Test with disposable
+content and a separate backup before enabling an existing-folder pair.
+
 ## Safety model
 
 - Automated sync never permanently deletes. Deleting a synced local binary moves its remote
