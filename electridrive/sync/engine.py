@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from electridrive.google_api.client import DriveClientProtocol
+from electridrive.google_api.folder_target import require_complete_folder_access
 from electridrive.storage.database import SyncDatabase
 from electridrive.sync.hasher import sha256_file
 from electridrive.sync.rules import SyncRules
@@ -103,6 +104,7 @@ class UploadOnlySyncEngine:
         qa.check_startup()
         from electridrive.config import SyncPair
         qa.validate_pair(SyncPair(str(local_root), remote_folder, direction="up_only", delete_policy="off"))
+        require_complete_folder_access(remote_folder)
         self.drive_client = qa.restrict_client(self.drive_client)
         result = SyncResult()
         local_root = canonical_sync_root(local_root)

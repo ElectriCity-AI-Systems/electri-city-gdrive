@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Protocol
 
 from electridrive.google_api.oauth import authenticate_interactive
+from electridrive.google_api.folder_target import direct_folder_id
 
 LOGGER = logging.getLogger(__name__)
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -335,6 +336,14 @@ class GoogleDriveClient:
             seen.add(page)
 
     def ensure_folder_path(self, remote_path: str) -> str:
+        existing_id = direct_folder_id(remote_path)
+        if existing_id is not None:
+            # Never resolve by name or create a folder on ID lookup failure.
+            folder = self.get_metadata(existing_id)
+            if folder.id != existing_id or folder.trashed or not folder.is_folder:
+                raise ValueError("Drive folder ID does not identify an accessible, active folder")
+            return existing_id
+
         parts = [p.strip() for p in remote_path.replace("\\", "/").split("/") if p.strip()]
         if not parts:
             return "root"

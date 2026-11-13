@@ -32,6 +32,7 @@ from enum import Enum
 from pathlib import Path
 
 from electridrive.google_api.client import DRIVE_SHORTCUT_MIME, export_format_for
+from electridrive.google_api.folder_target import direct_folder_id, require_complete_folder_access
 from electridrive.sync.downloader import sanitize_name
 from electridrive.sync.hasher import md5_file
 from electridrive.sync.rules import SyncRules
@@ -1005,6 +1006,7 @@ class TwoWaySyncEngine:
 
     def _bind_roots(self) -> str:
         self._check_cancel()
+        require_complete_folder_access(self.pair.remote_folder)
         identity = self._check_root()
         saved = self.db.get_meta(self._binding_key)
         if saved:
@@ -1012,11 +1014,17 @@ class TwoWaySyncEngine:
             if binding['local_identity'] != identity:
                 raise ValueError("Local sync root identity changed; explicit rebind required")
             root_id = binding['remote_id']
+            expected_id = direct_folder_id(self.pair.remote_folder)
+            if expected_id is not None and root_id != expected_id:
+                raise ValueError("Saved binding differs from exact Drive folder ID; explicit rebind required")
             metadata = self.client.get_metadata(root_id)
-            if metadata.trashed or not metadata.is_folder:
+            if metadata.id != root_id or metadata.trashed or not metadata.is_folder:
                 raise ValueError("Bound remote sync root unavailable; explicit rebind required")
         else:
             if qa.current_policy():
+                root_id = self.client.ensure_folder_path(self.pair.remote_folder)
+            elif direct_folder_id(self.pair.remote_folder) is not None:
+                # Exact-ID lookup must not create a missing remote folder.
                 root_id = self.client.ensure_folder_path(self.pair.remote_folder)
             elif self.pair.direction == "down_only":
                 # Resolving a download source must be read-only. A typo, moved
