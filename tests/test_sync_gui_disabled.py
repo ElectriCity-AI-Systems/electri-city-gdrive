@@ -119,6 +119,8 @@ def test_auto_newest_toggle_requires_consent_and_never_starts_sync(
         ]
         assert len(buttons()) == 1
         assert buttons()[0].text() == "Auto newest: OFF"
+        assert "manual review" in buttons()[0].toolTip()
+        assert "manuelle Prüfung" in buttons()[0].toolTip()
         monkeypatch.setattr(QMessageBox, "question",
                             lambda *args, **kwargs: QMessageBox.No)
         view._toggle_auto_newest_duplicate(0)

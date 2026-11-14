@@ -55,12 +55,12 @@ jobs:
           printf '%s' "$ELECTRIDRIVE_APP_CLIENT_JSON" > "$ELECTRIDRIVE_APP_CLIENT_FILE"
           chmod 600 "$ELECTRIDRIVE_APP_CLIENT_FILE"
           bash scripts/build_release.sh
-          test "$(dpkg-deb --field dist/electridrive_2.2.1_amd64.deb Version)" = "2.2.1"
+          test "$(dpkg-deb --field dist/electridrive_2.2.2_amd64.deb Version)" = "2.2.2"
 
       - name: Verify the exact artifacts, provenance, and checksums
         run: |
           (cd dist && sha256sum --check SHA256SUMS.txt)
-          python scripts/verify_customer_artifact.py dist/electridrive_2.2.1_amd64.deb \
+          python scripts/verify_customer_artifact.py dist/electridrive_2.2.2_amd64.deb \
             --expected-channel CUSTOMER-CANDIDATE --expected-revision "$GITHUB_SHA"
           python scripts/verify_customer_artifact.py dist/ElectriDrive-x86_64.AppImage \
             --expected-channel CUSTOMER-CANDIDATE --expected-revision "$GITHUB_SHA"
@@ -72,7 +72,7 @@ jobs:
           chmod 700 "$profile/runtime"
           test ! -e "$profile/config/electridrive/credentials.json"
           test ! -e "$profile/config/electridrive/app_client.json"
-          sudo apt-get install -y ./dist/electridrive_2.2.1_amd64.deb
+          sudo apt-get install -y ./dist/electridrive_2.2.2_amd64.deb
 
           XDG_CONFIG_HOME="$profile/config" XDG_STATE_HOME="$profile/state" \
           XDG_CACHE_HOME="$profile/cache" /usr/bin/electridrive --doctor | tee "$profile/doctor.out"
@@ -143,9 +143,9 @@ jobs:
       - name: Upload candidate artifacts (not a release)
         uses: actions/upload-artifact@v6
         with:
-          name: electridrive-2.2.1-customer-candidate-${{ github.sha }}
+          name: electridrive-2.2.2-customer-candidate-${{ github.sha }}
           path: |
-            dist/electridrive_2.2.1_amd64.deb
+            dist/electridrive_2.2.2_amd64.deb
             dist/ElectriDrive-x86_64.AppImage
             dist/SHA256SUMS.txt
           if-no-files-found: error

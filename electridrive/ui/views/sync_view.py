@@ -193,8 +193,20 @@ class SyncView(QWidget):
             auto.setObjectName("AutoNewestDuplicate")
             auto.setProperty("ghost", True)
             auto.setToolTip(
-                "Upload-only: update all older same-name Drive objects from "
-                "the strictly newer local file. Preserves Drive IDs."
+                "Upload only: exact local checksum matches are linked to an "
+                "existing Drive ID without changing Drive content. Other "
+                "duplicates are updated only when the local file is strictly "
+                "newer than every verified binary copy. Unclear IDs or "
+                "timestamps, native Google Docs, or incomplete Drive access "
+                "need manual review before any transfer. Duplicate Drive IDs "
+                "are preserved.\n\n"
+                "Nur Upload: Exakte lokale Prüfsummen-Treffer werden einer "
+                "vorhandenen Drive-ID zugeordnet, ohne Drive-Inhalte zu "
+                "ändern. Andere Dubletten werden nur bei eindeutig neuerer "
+                "lokaler Datei aktualisiert. Unklare IDs oder Zeitstempel, "
+                "Google Docs oder unvollständiger Drive-Zugriff erfordern vor "
+                "jeder Übertragung eine manuelle Prüfung. Alle Drive-IDs "
+                "bleiben erhalten."
             )
             auto.setEnabled(not self._sync_busy)
             auto.clicked.connect(lambda: self._toggle_auto_newest_duplicate(index))
