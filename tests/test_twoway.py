@@ -561,14 +561,14 @@ def _set_local_age(path: Path, days: float) -> None:
 def test_up_only_auto_updates_unique_newest_duplicate_when_local_is_newer(tmp_path: Path):
     root = tmp_path / "uploads"
     root.mkdir()
-    local = root / "hetzner2026.odt"
+    local = root / "draft-report.odt"
     local.write_bytes(b"latest local document")
     _set_local_age(local, 1)
     fake = FakeDrive()
     folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
-    older = fake.add_file("hetzner2026.odt", b"old original", parent=folder,
+    older = fake.add_file("draft-report.odt", b"old original", parent=folder,
                           modified=_utc_stamp(50))
-    newest = fake.add_file("hetzner2026.odt", b"newer drive original",
+    newest = fake.add_file("draft-report.odt", b"newer drive original",
                            parent=folder, modified=_utc_stamp(30))
     db = SyncDatabase(tmp_path / "state.sqlite3")
     pair = SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only", auto_select_newest_duplicate=True)
@@ -587,7 +587,7 @@ def test_up_only_auto_updates_unique_newest_duplicate_when_local_is_newer(tmp_pa
         assert fake.nodes[newest]["content"] == b"latest local document"
         assert fake.nodes[older]["content"] == b"latest local document"
         assert not fake.nodes[older]["trashed"]
-        assert db.get_sync_item(engine.pair_id, "hetzner2026.odt").remote_id == newest
+        assert db.get_sync_item(engine.pair_id, "draft-report.odt").remote_id == newest
 
         # The update records the immutable ID for the next process lifecycle.
         before = len(fake.updates)
@@ -596,6 +596,53 @@ def test_up_only_auto_updates_unique_newest_duplicate_when_local_is_newer(tmp_pa
         assert second.failed == 0 and second.uploaded == 0
         assert second.auto_selected_duplicates == 0
         assert len(fake.updates) == before
+    finally:
+        db.close()
+
+
+def test_up_only_duplicate_update_failure_reports_successful_partial_write(tmp_path: Path):
+    class FailingOlderUpdate(FakeDrive):
+        fail_id = ""
+
+        def update_file(self, file_id, local_file, remote_name=None, progress_cb=None):
+            if file_id == self.fail_id:
+                raise OSError("synthetic duplicate update failure")
+            return super().update_file(file_id, local_file, remote_name, progress_cb)
+
+    root = tmp_path / "uploads"
+    root.mkdir()
+    local = root / "report.txt"
+    local.write_bytes(b"authoritative local content")
+    _set_local_age(local, 1)
+    fake = FailingOlderUpdate()
+    folder = fake.ensure_folder_path("ElectriDrive/SyncTest")
+    older = fake.add_file("report.txt", b"older remote content", parent=folder,
+                          modified=_utc_stamp(50))
+    newest = fake.add_file("report.txt", b"newer remote content", parent=folder,
+                           modified=_utc_stamp(30))
+    fake.fail_id = older
+    db = SyncDatabase(tmp_path / "state.sqlite3")
+    try:
+        result = TwoWaySyncEngine(
+            fake, db, SyncPair(
+                str(root), "ElectriDrive/SyncTest", direction="up_only",
+                auto_select_newest_duplicate=True,
+            )
+        ).run()
+
+        assert result.failed == 1 and not result.blocked_before_transfers
+        assert result.uploaded == 1
+        assert result.updated_duplicate_files == 0
+        assert not result.unexplained_omissions
+        assert any(
+            "selected Drive file was updated, but duplicate convergence failed"
+            in error
+            for error in result.errors
+        )
+        assert fake.nodes[newest]["content"] == b"authoritative local content"
+        assert fake.nodes[older]["content"] == b"older remote content"
+        assert fake.updates == [(newest, str(local), None)]
+        assert not fake.uploads
     finally:
         db.close()
 
@@ -633,7 +680,7 @@ def test_up_only_auto_selection_refuses_unsafe_timestamp_order(
         db.close()
 
 
-def test_up_only_auto_selection_preserves_older_matching_local_version(tmp_path: Path):
+def test_up_only_auto_selection_adopts_exact_remote_match_without_writes(tmp_path: Path):
     root = tmp_path / "uploads"
     root.mkdir()
     local = root / "same.txt"
@@ -647,10 +694,36 @@ def test_up_only_auto_selection_preserves_older_matching_local_version(tmp_path:
                            parent=folder, modified=_utc_stamp(30))
     db = SyncDatabase(tmp_path / "state.sqlite3")
     try:
-        result = TwoWaySyncEngine(
-            fake, db, SyncPair(str(root), "ElectriDrive/SyncTest", direction="up_only", auto_select_newest_duplicate=True)
-        ).run()
-        assert result.failed and result.blocked_before_transfers
+        engine = TwoWaySyncEngine(
+            fake, db, SyncPair(
+                str(root), "ElectriDrive/SyncTest", direction="up_only",
+                auto_select_newest_duplicate=True,
+            )
+        )
+        result = engine.run()
+        assert result.failed == result.unexplained_omissions == 0
+        assert not result.blocked_before_transfers
+        assert result.auto_selected_duplicates == 1
+        assert result.uploaded == result.updated_duplicate_files == 0
+        assert result.recorded == 1
+        assert result.remote_path_conflicts[0].resolved
+        assert result.remote_path_conflicts[0].canonical_id == older
+        assert not fake.updates and not fake.uploads
+        assert fake.nodes[older]["content"] == b"old matching content"
+        assert fake.nodes[newest]["content"] == b"different newer content"
+        assert not fake.nodes[older]["trashed"] and not fake.nodes[newest]["trashed"]
+        assert db.get_sync_item(engine.pair_id, "same.txt").remote_id == older
+
+        # A fresh settings/model instance and engine use the persisted file ID;
+        # repeating the sync remains a no-op and retains both remote objects.
+        pair = SyncPair(
+            str(root), "ElectriDrive/SyncTest", direction="up_only",
+            auto_select_newest_duplicate=True,
+        )
+        reloaded = Settings.from_dict(Settings(sync_pairs=[pair]).to_dict()).sync_pairs[0]
+        second = TwoWaySyncEngine(fake, db, reloaded).run()
+        assert second.failed == 0 and second.uploaded == 0
+        assert second.auto_selected_duplicates == 0
         assert not fake.updates and not fake.uploads
         assert fake.nodes[older]["content"] == b"old matching content"
         assert fake.nodes[newest]["content"] == b"different newer content"

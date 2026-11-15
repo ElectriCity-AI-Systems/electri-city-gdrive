@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.2 — proposed, not released
+
+### Changed
+
+- Upload-only Auto newest can bind an existing Drive ID when a complete,
+  verified duplicate scan finds bytes identical to the local file. This is a
+  no-write reconciliation: all duplicate IDs and differing remote contents are
+  retained. Without an exact match, automatic updates still require the local
+  file to be unambiguously newer than every verified binary duplicate.
+- Newer remote versions, tied or unknown timestamps, native Google Workspace
+  files, incomplete Drive inventories, and unknown identities remain blocked
+  before transfers and require review.
+
+### Upgrade and release status
+
+- v2.2.2 is a proposed successor to the existing stale v2.2.1 pre-release; do
+  not move or replace the v2.2.1 tag or its assets. See
+  `docs/RELEASE-2.2.2.md` for the upgrade path and independent release gates.
+- This change does not broaden `drive.file` visibility. Arbitrary pre-existing
+  Drive contents are not guaranteed to be visible; use full Drive access or
+  grant the exact folder and verify that the inventory is complete.
+
 ## 2.1.3 — 2026-10-10
 
 ### Fixed

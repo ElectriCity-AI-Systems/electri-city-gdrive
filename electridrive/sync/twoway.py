@@ -690,11 +690,12 @@ class TwoWaySyncEngine:
         remote: dict[str, RemoteEntry],
         last: dict[str, LastEntry],
     ) -> bool:
-        """Select newest binary Drive ID for an explicitly opted-in sync pair.
+        """Select a safe existing binary Drive ID for an opted-in sync pair.
 
-        Only a strictly newer local file authorizes this one-time adoption. A
-        previous sync binding, owner-reviewed ID, ties, unsafe names or missing
-        checksums always take precedence over an automatic choice. Every
+        For Upload-only, an exact local checksum match can be adopted without
+        writing remote content. Otherwise, only a strictly newer local file
+        authorizes updating duplicate IDs. A previous binding, owner-reviewed
+        ID, ambiguous timestamps or missing checksums take precedence. Every
         candidate is freshly checked against the completed cloud inventory.
         """
         if (not (self.pair.direction == "up_only"
@@ -713,32 +714,49 @@ class TwoWaySyncEngine:
             return False
         timestamps = {}
         for fid, entry in candidates.items():
-            stamp = _strict_timestamp(entry.modified)
-            if (stamp is None or entry.is_google_doc
+            if (entry.is_google_doc
                     or (entry.mime_type or "").startswith("application/vnd.google-apps.")
                     or not entry.md5 or not fid):
                 return False
-            timestamps[fid] = stamp
-        newest_id = max(timestamps, key=timestamps.get)
-        newest_stamp = timestamps[newest_id]
-        # Allow a margin for timestamp precision and clock differences.
-        if sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1:
-            return False
         if local is None:
             if self.pair.direction != "two_way":
                 return False
+            for fid, entry in candidates.items():
+                stamp = _strict_timestamp(entry.modified)
+                if stamp is None:
+                    return False
+                timestamps[fid] = stamp
+            newest_id = max(timestamps, key=timestamps.get)
+            newest_stamp = timestamps[newest_id]
+            if sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1:
+                return False
             source = "remote"
         else:
-            source = _strict_newest_side(local, candidates[newest_id])
-            if source is None or (self.pair.direction == "up_only" and source != "local"):
-                return False
-            # If the local version matches an *older* candidate, adopting
-            # another Drive ID as an upload target is not a safe assumption.
-            if source == "local" and any(
-                entry.md5 == local.md5 for fid, entry in candidates.items()
-                if fid != newest_id
-            ):
-                return False
+            matching_ids = [
+                fid for fid, entry in candidates.items()
+                if entry.md5 == local.md5 and entry.size == local.size
+            ]
+            if matching_ids and self.pair.direction == "up_only":
+                # The exact bytes already exist remotely. Bind one stable ID,
+                # but preserve every duplicate object's distinct content.
+                newest_id = min(matching_ids)
+                source = "identical"
+            else:
+                for fid, entry in candidates.items():
+                    stamp = _strict_timestamp(entry.modified)
+                    if stamp is None:
+                        return False
+                    timestamps[fid] = stamp
+                newest_id = max(timestamps, key=timestamps.get)
+                newest_stamp = timestamps[newest_id]
+                # Allow a margin for timestamp precision and clock differences.
+                if sum(value >= newest_stamp - 1.0 for value in timestamps.values()) != 1:
+                    return False
+                source = _strict_newest_side(local, candidates[newest_id])
+                if source is None or (
+                    self.pair.direction == "up_only" and source != "local"
+                ):
+                    return False
 
         verified = {}
         for fid, entry in sorted(candidates.items()):
@@ -861,6 +879,8 @@ class TwoWaySyncEngine:
         before_local, verified, source = self._auto_update_guards[rel]
         if canonical_id != self._canonical_ids.get(rel):
             raise RuntimeError("Drive target identity changed during duplicate convergence")
+        if source == "identical":
+            return
         with opened_source(self.local_root, rel) as data:
             stat = data.stat()
             md5 = md5_file(data)
@@ -897,13 +917,13 @@ class TwoWaySyncEngine:
                 result_id = updater(fid, handle, progress_cb=self._check_cancel)
             if result_id != fid:
                 raise RuntimeError("Drive update changed duplicate identity")
+            report.updated_duplicate_files += 1
             final = self.client.get_metadata(fid)
             if (final.trashed or final.name != current.name
                     or tuple(final.parents) != tuple(current.parents)
                     or final.mime_type != current.mime_type
                     or final.md5_checksum != md5 or final.size != stat.st_size):
                 raise RuntimeError("Older Drive duplicate failed post-upload verification")
-            report.updated_duplicate_files += 1
 
     def _path_conflicts(
         self, remote: dict[str, RemoteEntry], local_paths: set[str],
@@ -1297,13 +1317,13 @@ class TwoWaySyncEngine:
                 if (not preferred or preferred not in candidate_ids
                         or remote.get(rel) is None
                         or remote[rel].file_id != preferred):
-                    # A unique newest binary file may be adopted only when the
-                    # local content is strictly newer than *all* duplicates.
-                    # All other originals are preserved under their Drive IDs.
+                    # A checksum-identical existing file is a safe no-write
+                    # binding; otherwise local content must be strictly newer
+                    # than every duplicate before an in-place update.
                     if self._auto_select_newest_duplicate(rel, local.get(rel), remote, last):
                         report.auto_selected_duplicates += 1
-                        self._log("Latest-wins: newest duplicate Drive ID selected; "
-                                  "older Drive IDs will be updated in place")
+                        self._log("Verified an existing duplicate Drive ID; "
+                                  "no Drive IDs will be deleted")
                     else:
                         self._remote_scan_errors.append(
                             "ambiguous upload target: duplicate remote file path"
@@ -1600,14 +1620,24 @@ class TwoWaySyncEngine:
                     fid = confirmed.file_id
                 else:
                     fid = self._upload(rel, parent_id, None)
+            report.uploaded += 1
             meta = self.client.get_metadata(fid)
             remote[rel] = RemoteEntry(rel, fid, meta.modified_time or "",
                                       meta.md5_checksum or L.md5, meta.size or L.size,
                                       mime_type=meta.mime_type,
                                       web_view_link=meta.web_view_link)
-            self._refresh_older_duplicate_ids(rel, fid, report)
+            try:
+                self._refresh_older_duplicate_ids(rel, fid, report)
+            except SyncCancelled:
+                raise
+            except Exception as exc:
+                if rel in self._auto_update_guards:
+                    raise RuntimeError(
+                        "selected Drive file was updated, but duplicate convergence "
+                        f"failed: {exc}"
+                    ) from exc
+                raise
             self._record(rel, local, remote)
-            report.uploaded += 1
 
         elif a.kind == ActionKind.DOWNLOAD:
             R = remote[rel]
