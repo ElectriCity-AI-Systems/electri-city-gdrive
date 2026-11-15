@@ -1,0 +1,172 @@
+# One-time public beta release, pinned to v2.2.2.
+# Triggered only by successful CI for a push to the protected main branch.
+# Never publishes a different version or overwrites an existing tag/release.
+name: Publish ElectriDrive 2.2.2 public beta
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: electridrive-v2.2.2-public-beta
+  cancel-in-progress: false
+
+jobs:
+  publish-beta:
+    if: >-
+      github.repository == 'ElectriCity-AI-Systems/electri-city-gdrive' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the exact tested commit, not a mutable branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Confirm this is still the current main and v2.2.2 is unpublished
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          current="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$current" != "$EXPECTED_SHA" ]; then
+            echo "Candidate is no longer main; no release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          if [ "$version" != "2.2.2" ]; then
+            echo "Version is not 2.2.2; no release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view v2.2.2 --repo ElectriCity-AI-Systems/electri-city-gdrive >/dev/null 2>&1; then
+            echo "v2.2.2 already exists; never replace its artifacts."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git ls-remote --tags origin refs/tags/v2.2.2 | grep -q .; then
+            echo "v2.2.2 tag already exists; never move it."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up release Python
+        if: steps.guard.outputs.publish == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install artifact verification dependencies
+        if: steps.guard.outputs.publish == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils libfuse2t64 fuse3
+
+      - name: Recover exact previously approved public Desktop OAuth client
+        if: steps.guard.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          seed="$RUNNER_TEMP/electridrive-public-client"
+          mkdir -p "$seed"
+          gh release download v2.1.3 --repo ElectriCity-AI-Systems/electri-city-gdrive \
+            --pattern electridrive_2.1.3_amd64.deb --dir "$seed"
+          printf '%s  %s\n' \
+            '35206f345e1fd1f50e29e6991afaed6eba402e82a7030642371f62ec82d98f35' \
+            "$seed/electridrive_2.1.3_amd64.deb" | sha256sum -c -
+          dpkg-deb -x "$seed/electridrive_2.1.3_amd64.deb" "$seed/extracted"
+          client="$seed/extracted/opt/electridrive/_internal/electridrive/google_api/client_baked.json"
+          printf '%s  %s\n' \
+            '180f96b5506b90aee5ca4fc8d852d394248f2a325b0a4e18e923d590942ea283' \
+            "$client" | sha256sum -c -
+          chmod 600 "$client"
+          echo "ELECTRIDRIVE_APP_CLIENT_FILE=$client" >> "$GITHUB_ENV"
+
+      - name: Build and verify both public beta packages
+        if: steps.guard.outputs.publish == 'true'
+        run: bash scripts/build_candidate_in_container.sh
+
+      - name: Write transparent public beta release notes
+        if: steps.guard.outputs.publish == 'true'
+        run: |
+          cat > "$RUNNER_TEMP/electridrive-beta-notes.md" <<'EOF'
+          # ElectriDrive 2.2.2 — Free public beta
+
+          Free technology-preview release for feedback on Ubuntu/Linux.
+          This is **not a stable release** or a guarantee of complete backup.
+
+          ## Changes
+          - With Upload-only and **Auto newest** opted in, ElectriDrive can
+            recognize an existing same-name Drive file whose content checksum
+            and size exactly match the local file and reuse its existing ID
+            without writing or deleting any file.
+          - Local files that are unequivocally newer than every verified
+            same-name Drive candidate may update those existing Drive IDs in place.
+          - Improved reporting of partial update failures and explanations
+            of why uncertain duplicate cases still stop safely.
+
+          ## Important known limits
+          - The default Google `drive.file` permission may not show all existing
+            files in legacy Google Drive folders. Do not assume complete
+            visibility or rely on this beta as the only backup.
+          - Ambiguous duplicates, changed or unavailable cloud metadata,
+            Google Workspace native files, and concurrent edits can still block.
+          - Complete full-tree backup of symlinks is not supported.
+          - Save an independent backup before syncing valuable documents.
+          - Existing duplicate Drive objects retain their separate IDs and
+            may retain different content; this beta does not delete them.
+          - No personal Google Drive folders were used by CI.
+
+          ## Installation
+          Download the Debian package or AppImage below and verify its SHA256
+          against `SHA256SUMS.txt`. Existing settings remain in your user profile.
+          Review synchronization settings and use a disposable test folder first.
+
+          ## Feedback
+          Report reproducible bugs at:
+          https://github.com/ElectriCity-AI-Systems/electri-city-gdrive/issues
+
+          Build provenance and checksums are included in the attached manifest.
+          EOF
+
+      - name: Create cryptographically verified release draft from exact green CI
+        if: steps.guard.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          python3 scripts/prepare_release_draft.py \
+            --ci-run "$CI_RUN" \
+            --notes "$RUNNER_TEMP/electridrive-beta-notes.md"
+
+      - name: Publish reviewed artifacts as public prerelease
+        if: steps.guard.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit v2.2.2 \
+            --repo ElectriCity-AI-Systems/electri-city-gdrive \
+            --title "ElectriDrive 2.2.2 — Free Public Beta" \
+            --draft=false --prerelease
+          gh release view v2.2.2 \
+            --repo ElectriCity-AI-Systems/electri-city-gdrive \
+            --json isDraft,isPrerelease,tagName,assets \
+            --jq 'if (.isDraft == false and .isPrerelease == true and .tagName == "v2.2.2" and ((.assets | length) == 4)) then "Published v2.2.2 public prerelease with four verified assets" else error("Beta release verification failed") end'
