@@ -13,6 +13,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Offline unit tests
+        run: python -m unittest discover -s tests -p 'test_github_release_statistics.py' -v
       - name: Read public GitHub release counts
         env:
           GITHUB_TOKEN: ${{ github.token }}
