@@ -1,0 +1,24 @@
+name: ElectriDrive release download statistics
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'
+permissions:
+  contents: read
+jobs:
+  release-stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read public GitHub release counts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/github_release_statistics.py release-statistics
+      - uses: actions/upload-artifact@v4
+        with:
+          name: electridrive-download-statistics
+          path: release-statistics/
+          retention-days: 90
